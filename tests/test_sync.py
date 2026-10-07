@@ -9,7 +9,7 @@ import pytest
 
 import thermpix_sync
 
-PATIENTS = {"101": "Jane Citizen", "102": "John Smith"}
+PATIENTS = {"101": "Jane Citizen", "102": "John Smith", "103": "Mary Jones"}
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
 LOGIN = """<html><body><a href="/login">Log in</a></body></html>"""
@@ -18,16 +18,25 @@ LOGIN_FORM = """<html><body><form method="post" action="/login">
 <button type="submit">Sign in</button></form></body></html>"""
 
 
-def dashboard(mode, patients):
-    rows = []
-    for pid, name in patients.items():
-        if mode == "direct":
-            rows.append(f'<tr><td>{name}</td><td><a href="/files/{pid}.jpg">Download</a></td></tr>')
-        else:
-            rows.append(f'<tr><td><a href="/patient/{pid}">{name}</a></td></tr>')
-    return f"""<html><body><nav><a href="/settings">Settings</a></nav>
-<div class="card"><h3>Recently Created Patients</h3><table>{''.join(rows)}</table></div>
-<div class="card"><h3>Other</h3><a href="/files/other.jpg">Download</a></div></body></html>"""
+MENU = """<nav><a href="/">Dashboard</a> <a href="/entities">Entities</a> <a href="/clinics">Clinics</a>
+<a href="/users">Users</a> <a href="/patients">Patients</a> <a href="/devices">Devices</a></nav>"""
+PER_PAGE = 2
+
+
+def dashboard():
+    return f"<html><body>{MENU}<h3>Recently Created Patients</h3></body></html>"
+
+
+def patient_list(patients, page):
+    ids = list(patients)
+    chunk = ids[(page - 1) * PER_PAGE: page * PER_PAGE]
+    rows = "".join(
+        f'<tr><td><a href="/patient/{pid}">{patients[pid]}</a></td><td><a href="/patient/{pid}/edit">Edit</a></td></tr>'
+        for pid in chunk
+    )
+    more = page * PER_PAGE < len(ids)
+    nxt = f'<a href="/patients?page={page + 1}">Next</a>' if more else '<a class="disabled">Next</a>'
+    return f"<html><body>{MENU}<table><tr><th>Name</th><th></th></tr>{rows}</table>{nxt}</body></html>"
 
 
 def make_handler(site):
@@ -49,12 +58,15 @@ def make_handler(site):
 
         def do_GET(self):
             if self.path == "/":
-                return self.send(dashboard(site["mode"], site["patients"]) if self.logged_in() else LOGIN)
+                return self.send(dashboard() if self.logged_in() else LOGIN)
             if self.path == "/login":
                 return self.send(LOGIN_FORM)
             if not self.logged_in():
                 self.send_response(403)
                 return self.end_headers()
+            if self.path.startswith("/patients"):
+                page = int(self.path.split("page=")[1]) if "page=" in self.path else 1
+                return self.send(patient_list(site["patients"], page))
             if self.path.startswith("/files/"):
                 name = self.path.rsplit("/", 1)[1]
                 return self.send(b"JPEGDATA-" + name.encode(), "image/jpeg")
@@ -91,7 +103,7 @@ def make_handler(site):
 
 @pytest.fixture
 def site(tmp_path, monkeypatch):
-    state = {"mode": "direct", "patients": dict(PATIENTS), "images": {"101": ["a1"], "102": ["b1"]}}
+    state = {"patients": dict(PATIENTS), "images": {"101": ["a1"], "102": ["b1"], "103": ["c1"]}}
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), make_handler(state))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
@@ -110,43 +122,43 @@ def files(folder):
     return sorted(p.name for p in Path(folder).iterdir())
 
 
-def test_direct_downloads_only_new_images_named_by_patient(site):
-    thermpix_sync.sync(site["config"])
-    assert files(site["out"]) == [f"Jane Citizen - {TODAY} - 101.jpg", f"John Smith - {TODAY} - 102.jpg"]
-    assert (site["out"] / f"Jane Citizen - {TODAY} - 101.jpg").read_bytes() == b"JPEGDATA-101.jpg"
-
-    thermpix_sync.sync(site["config"])  # nothing new
-    assert len(files(site["out"])) == 2
-
-    site["patients"]["103"] = "New Patient"
-    thermpix_sync.sync(site["config"])
-    assert files(site["out"])[-1] == f"New Patient - {TODAY} - 103.jpg"
-    assert len(files(site["out"])) == 3
-
-
-def test_patient_pages_and_returning_patient(site):
-    site["mode"] = "patient"
+def test_downloads_every_patient_across_pages(site):
     thermpix_sync.sync(site["config"])
     assert files(site["out"]) == [
         f"Jane Citizen - {TODAY} - a1.jpg",
         f"Jane Citizen - {TODAY} - report-101.pdf",
         f"John Smith - {TODAY} - b1.jpg",
         f"John Smith - {TODAY} - report-102.pdf",
+        f"Mary Jones - {TODAY} - c1.jpg",
+        f"Mary Jones - {TODAY} - report-103.pdf",
     ]
+    assert (site["out"] / f"Jane Citizen - {TODAY} - a1.jpg").read_bytes() == b"JPEGDATA-a1.jpg"
 
-    # Jane comes back for more scans: only the new image is downloaded.
-    site["images"]["101"].append("a2")
+    thermpix_sync.sync(site["config"])  # nothing new
+    assert len(files(site["out"])) == 6
+
+
+def test_returning_patient_gets_only_new_images(site):
     thermpix_sync.sync(site["config"])
-    assert len(files(site["out"])) == 5
-    assert f"Jane Citizen - {TODAY} - a2.jpg" in files(site["out"])
+    # Mary (on page 2 of the list) comes back for more scans.
+    site["images"]["103"].append("c2")
+    thermpix_sync.sync(site["config"])
+    assert len(files(site["out"])) == 7
+    assert f"Mary Jones - {TODAY} - c2.jpg" in files(site["out"])
 
 
 def test_mark_existing_skips_current_images(site):
     thermpix_sync.sync(site["config"], mark_existing=True)
     assert files(site["out"]) == []
-    site["patients"]["103"] = "New Patient"
+    site["images"]["101"].append("a2")
+    site["patients"]["104"] = "New Patient"
+    site["images"]["104"] = ["d1"]
     thermpix_sync.sync(site["config"])
-    assert files(site["out"]) == [f"New Patient - {TODAY} - 103.jpg"]
+    assert files(site["out"]) == [
+        f"Jane Citizen - {TODAY} - a2.jpg",
+        f"New Patient - {TODAY} - d1.jpg",
+        f"New Patient - {TODAY} - report-104.pdf",
+    ]
 
 
 def test_wrong_password(site, monkeypatch):

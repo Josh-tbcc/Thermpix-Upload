@@ -32,6 +32,20 @@ Write-Host "`n== Your Thermpix login ==" -ForegroundColor Cyan
 Write-Host "Saved in Windows Credential Manager on this computer only."
 & $venvPython (Join-Path $here "thermpix_sync.py") --set-login
 
+Write-Host "`n== Recording the images already in Thermpix ==" -ForegroundColor Cyan
+$state = Join-Path $env:LOCALAPPDATA "ThermpixSync\state.json"
+if (Test-Path $state) {
+    Write-Host "Already done on an earlier install - skipping."
+} else {
+    Write-Host "Checking every patient so only images taken from now on get downloaded."
+    Write-Host "This can take several minutes. Nothing is downloaded in this step."
+    & $venvPython (Join-Path $here "thermpix_sync.py") --mark-existing
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "`nThat didn't work - the message above says why. Nothing has been scheduled yet." -ForegroundColor Red
+        exit 1
+    }
+}
+
 Write-Host "`n== Scheduling the daily 7pm run ==" -ForegroundColor Cyan
 $action = New-ScheduledTaskAction -Execute (Join-Path $venv "Scripts\pythonw.exe") `
     -Argument "`"$(Join-Path $here 'thermpix_sync.py')`"" -WorkingDirectory $here

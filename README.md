@@ -1,16 +1,17 @@
 # Thermpix DPA Sync
 
-Every day at 7pm this logs into Thermpix (https://usatherm.com/), looks at
-**Recently Created Patients** on the dashboard, and downloads any image that
-hasn't been downloaded before into a folder called **DPAs** on your Desktop.
-New images for a returning patient are picked up too. Each file is named after
-the patient, e.g. `Jane Citizen - 2026-10-07 - scan1.jpg`.
+Every day at 7pm this logs into Thermpix (https://usatherm.com/), goes through
+every patient under **Patients**, and downloads any image that hasn't been
+downloaded before into a folder called **DPAs** on your Desktop. That covers new
+patients and new images for returning patients. Each file is named after the
+patient, e.g. `Jane Citizen - 2026-10-07 - scan1.jpg`.
 
 - It uses its own hidden browser, so your Chrome and your download settings are untouched.
 - Your login is stored in Windows Credential Manager on your computer, not in this repo.
 - Each image is only downloaded once. The list of images already done is kept in
   `%LOCALAPPDATA%\ThermpixSync\state.json`.
 - If the computer is off or asleep at 7pm, it runs as soon as it's back on.
+- Checking every patient takes a while if you have a lot of them, which is fine at 7pm.
 
 ## Setup (once, about 5 minutes)
 
@@ -20,19 +21,10 @@ the patient, e.g. `Jane Citizen - 2026-10-07 - scan1.jpg`.
    somewhere permanent, e.g. `Documents\Thermpix-Upload`. Don't run it from the
    Downloads folder or the zip itself, because the 7pm task runs from wherever you put it.
 3. **Double-click `Install.bat`.** It installs what's needed, asks for your Thermpix
-   username and password once, and sets up the 7pm schedule.
+   username and password once, records the images already in Thermpix (so it only
+   downloads images taken from then on), and sets up the 7pm schedule.
 4. **Double-click `Run Now.bat`** to test it. A browser window opens so you can watch
-   it log in and download. Check the new files in `Desktop\DPAs`.
-
-### Don't want the old patients?
-
-The first run downloads every image currently available for the patients in the
-Recently Created Patients list. To skip those and only get images taken from now on, run this once from the folder
-instead of `Run Now.bat`:
-
-```
-.venv\Scripts\python.exe thermpix_sync.py --mark-existing
-```
+   it log in and check each patient. New images land in `Desktop\DPAs`.
 
 ## Day to day
 
@@ -49,8 +41,8 @@ saved next to it (`error-<date>.png`).
 
 ## If it can't find things on the page
 
-The script finds the login boxes, the Recently Created Patients list and the
-download buttons by itself. If Thermpix's layout trips it up, copy
+The script finds the login boxes, the Patients menu link, the patient list (including
+its "Next" pages) and the download buttons by itself. If Thermpix's layout trips it up, copy
 `config.example.json` to `config.json` and fill in the CSS selector for the part
 it gets wrong, e.g. `"download": "a.btn-download"`. Any field left as `null` keeps
 the automatic detection.
@@ -63,6 +55,5 @@ playwright install chromium
 pytest
 ```
 
-The tests run the script against a small fake Thermpix site, covering both layouts
-it supports: download buttons directly in the patient list, or patient links that
-open a page with the download button.
+The tests run the script against a small fake Thermpix site with a paginated
+patient list, including a returning patient who gets new images.

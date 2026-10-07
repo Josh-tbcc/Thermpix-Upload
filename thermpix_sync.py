@@ -1,9 +1,9 @@
 """Download new patient images from Thermpix (usatherm.com) into Desktop\\DPAs.
 
 Logs in with the username/password saved in Windows Credential Manager,
-opens the dashboard, finds the "Recently Created Patients" list and downloads
-every image there that hasn't been downloaded before, including new images
-for patients seen previously. Files are named "<patient> - <date> - <file>".
+opens the full patient list and checks every patient's page, downloading
+each image that hasn't been downloaded before - so new images for returning
+patients are picked up too. Files are named "<patient> - <date> - <file>".
 Images already downloaded are remembered in state.json, so each is only
 fetched once.
 
@@ -42,8 +42,12 @@ DEFAULTS = {
     # Folder name created on the Desktop. Set "output_dir" to a full path to override.
     "folder_name": "DPAs",
     "output_dir": None,
-    # Heading text of the dashboard list to download from.
-    "section_text": "Recently Created Patients",
+    # Menu link that opens the full patient list, and an optional direct URL
+    # for that list if the menu link can't be found.
+    "patients_link_text": "Patients",
+    "patients_url": None,
+    # Safety limit on how many pages of the patient list to walk through.
+    "max_list_pages": 200,
     "headless": True,
     "timeout_seconds": 60,
     # Optional CSS selectors. Leave null to let the script find things itself;
@@ -53,9 +57,10 @@ DEFAULTS = {
         "username": None,
         "password": None,
         "submit": None,
-        "section": None,
-        "download": None,
+        "patients_link": None,
         "patient_link": None,
+        "next_page": None,
+        "download": None,
     },
 }
 
@@ -83,6 +88,15 @@ LOGIN_LINK_SELECTORS = [
     "button:has-text('Log in')",
     "button:has-text('Login')",
     "button:has-text('Sign in')",
+]
+NEXT_PAGE_SELECTORS = [
+    "a[rel=next]",
+    "[aria-label*=next i]",
+    "a:text-is('Next')",
+    "button:text-is('Next')",
+    "a:has-text('Next ')",
+    "a:text-is('›')",
+    "a:text-is('»')",
 ]
 DOWNLOAD_SELECTOR = ", ".join([
     "a[download]",
@@ -230,41 +244,73 @@ def login(page, config, username, password):
     log.info("Logged in")
 
 
-def find_section(page, config):
-    """The part of the dashboard under the "Recently Created Patients" heading."""
+def open_patient_list(page, config):
+    """Go from the dashboard to the page listing all patients."""
     sel = config["selectors"]
-    if sel["section"]:
-        section = page.locator(sel["section"]).first
-        section.wait_for()
-        return section
-
-    pattern = re.compile(re.escape(config["section_text"]), re.I)
-    heading = page.get_by_text(pattern).first
-    heading.wait_for()
-    # Walk up from the heading to the smallest container that holds the list.
-    for level in range(1, 10):
-        container = heading.locator(f"xpath=ancestor::*[{level}]")
-        if container.count() == 0:
-            break
-        if container.locator("a[href], button").count() > 0:
-            return container
-    raise RuntimeError(f"Found '{config['section_text']}' but no patients under it")
-
-
-def patient_name(el):
-    """The patient's name for a link or download button in the patient list."""
-    if el.evaluate("e => e.tagName") == "A" and "download" not in el.inner_text().lower():
-        text = el.inner_text()  # a patient link: its text is the name
+    if config["patients_url"]:
+        page.goto(urljoin(page.url, config["patients_url"]), wait_until="networkidle")
+        return
+    if sel["patients_link"]:
+        link = page.locator(sel["patients_link"]).first
     else:
-        row = el.locator("xpath=ancestor-or-self::*[self::tr or self::li][1]")
-        first_cell = row.locator("td, th").first
-        if row.count() and first_cell.count():
-            text = first_cell.inner_text()
-        elif row.count():
-            text = row.inner_text().replace(el.inner_text(), " ")
-        else:
-            text = el.inner_text()
-    return " ".join(text.split()) or "Unknown patient"
+        pattern = re.compile(rf"^\s*(all\s+)?{re.escape(config['patients_link_text'])}\s*$", re.I)
+        link = page.get_by_role("link", name=pattern).first
+    try:
+        link.wait_for(state="visible")
+    except PlaywrightTimeout:
+        raise RuntimeError(
+            f"Couldn't find the '{config['patients_link_text']}' menu link. "
+            "Set patients_url in config.json to the address of the patient list."
+        )
+    link.click()
+    page.wait_for_load_state("networkidle")
+    log.info("Opened patient list: %s", page.url)
+
+
+def patient_links_on_page(page, config):
+    """{url: name} for the patient links in the list on the current page."""
+    sel = config["selectors"]
+    if sel["patient_link"]:
+        candidates = page.locator(sel["patient_link"])
+    else:
+        # The first link in each table row / list item of the main content.
+        candidates = page.locator(
+            "xpath=//*[self::tr or self::li][not(ancestor::nav or ancestor::header "
+            "or ancestor::footer or ancestor::aside)]/descendant::a[@href][1]"
+        )
+    patients = {}
+    for i in range(candidates.count()):
+        el = candidates.nth(i)
+        href = el.get_attribute("href") or ""
+        name = " ".join(el.inner_text().split())
+        if not name or href.startswith(("#", "javascript", "mailto")) or "download" in name.lower():
+            continue
+        url = urljoin(page.url, href)
+        if url != page.url:
+            patients.setdefault(url, name)
+    return patients
+
+
+def all_patients(page, config):
+    """Walk every page of the patient list and return {url: name}."""
+    open_patient_list(page, config)
+    patients = {}
+    for page_number in range(1, config["max_list_pages"] + 1):
+        found = patient_links_on_page(page, config)
+        new = {url: name for url, name in found.items() if url not in patients}
+        patients.update(new)
+        log.info("Patient list page %d: %d patients", page_number, len(found))
+        if not new:
+            break  # same page again: we've run out of pages
+        next_link = first_visible(page, [config["selectors"]["next_page"]] + NEXT_PAGE_SELECTORS)
+        if not next_link or next_link.get_attribute("disabled") is not None or \
+                "disabled" in (next_link.get_attribute("class") or ""):
+            break
+        next_link.click()
+        page.wait_for_load_state("networkidle")
+    if not patients:
+        raise RuntimeError(f"No patients found on the patient list page ({page.url})")
+    return patients
 
 
 def row_label(el):
@@ -280,33 +326,9 @@ def image_key(page, el, fallback):
     return fallback
 
 
-def iter_images(page, section, config):
-    """Yield (key, patient name, page, element) for every image on offer.
-
-    If the patient list has download buttons, each is an image. Otherwise each
-    patient's page is opened and every download button there is an image, so
-    new images for a returning patient are picked up too.
-    """
-    sel = config["selectors"]
-    download_sel = sel["download"] or DOWNLOAD_SELECTOR
-    downloads = section.locator(download_sel)
-    if downloads.count():
-        seen = {}
-        for i in range(downloads.count()):
-            el = downloads.nth(i)
-            label = row_label(el)
-            seen[label] = seen.get(label, 0) + 1
-            yield image_key(page, el, f"{page.url}#{label}#{seen[label]}"), patient_name(el), page, el
-        return
-
-    links = section.locator(sel["patient_link"] or "a[href]")
-    patients = {}
-    for i in range(links.count()):
-        el = links.nth(i)
-        href = el.get_attribute("href") or ""
-        if not href.startswith(("#", "javascript", "mailto")):
-            patients.setdefault(urljoin(page.url, href), patient_name(el))
-
+def iter_images(page, patients, config):
+    """Yield (key, patient name, page, element) for every download on each patient's page."""
+    download_sel = config["selectors"]["download"] or DOWNLOAD_SELECTOR
     for url, name in patients.items():
         patient_page = page.context.new_page()
         try:
@@ -382,11 +404,12 @@ def sync(config, headed=False, dry_run=False, mark_existing=False):
         page = context.new_page()
         try:
             login(page, config, username, password)
-            section = find_section(page, config)
+            patients = all_patients(page, config)
+            log.info("Checking %d patients for new images", len(patients))
             today = datetime.now().strftime("%Y-%m-%d")
 
             listed = saved = 0
-            for key, name, owner, el in iter_images(page, section, config):
+            for key, name, owner, el in iter_images(page, patients, config):
                 listed += 1
                 if key in state["downloaded"]:
                     continue
