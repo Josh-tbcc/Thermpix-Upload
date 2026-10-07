@@ -1,0 +1,16 @@
+{
+  "base_url": "https://usatherm.com/",
+  "folder_name": "DPAs",
+  "section_text": "Recently Created Patients",
+  "headless": true,
+  "timeout_seconds": 60,
+  "selectors": {
+    "login_link": null,
+    "username": null,
+    "password": null,
+    "submit": null,
+    "section": null,
+    "download": null,
+    "patient_link": null
+  }
+}
