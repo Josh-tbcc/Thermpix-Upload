@@ -1,12 +1,14 @@
 # Thermpix DPA Sync
 
 Every day at 7pm this logs into Thermpix (https://usatherm.com/), looks at
-**Recently Created Patients** on the dashboard, and downloads any patient that
+**Recently Created Patients** on the dashboard, and downloads any image that
 hasn't been downloaded before into a folder called **DPAs** on your Desktop.
+New images for a returning patient are picked up too. Each file is named after
+the patient, e.g. `Jane Citizen - 2026-10-07 - scan1.jpg`.
 
 - It uses its own hidden browser, so your Chrome and your download settings are untouched.
 - Your login is stored in Windows Credential Manager on your computer, not in this repo.
-- Each patient is only downloaded once. The list of patients already done is kept in
+- Each image is only downloaded once. The list of images already done is kept in
   `%LOCALAPPDATA%\ThermpixSync\state.json`.
 - If the computer is off or asleep at 7pm, it runs as soon as it's back on.
 
@@ -24,8 +26,8 @@ hasn't been downloaded before into a folder called **DPAs** on your Desktop.
 
 ### Don't want the old patients?
 
-The first run downloads everyone currently in the Recently Created Patients list.
-To skip them and only get patients added from now on, run this once from the folder
+The first run downloads every image currently available for the patients in the
+Recently Created Patients list. To skip those and only get images taken from now on, run this once from the folder
 instead of `Run Now.bat`:
 
 ```

@@ -2,8 +2,10 @@
 
 Logs in with the username/password saved in Windows Credential Manager,
 opens the dashboard, finds the "Recently Created Patients" list and downloads
-every patient that hasn't been downloaded before. Patients already downloaded
-are remembered in state.json, so each one is only fetched once.
+every image there that hasn't been downloaded before, including new images
+for patients seen previously. Files are named "<patient> - <date> - <file>".
+Images already downloaded are remembered in state.json, so each is only
+fetched once.
 
 Usage:
     python thermpix_sync.py               run a sync (what the 7pm task does)
@@ -11,7 +13,7 @@ Usage:
     python thermpix_sync.py --headed      run with the browser visible
     python thermpix_sync.py --dry-run     list what would be downloaded
     python thermpix_sync.py --mark-existing
-                                          remember everything currently listed
+                                          remember every image currently listed
                                           as already downloaded, without
                                           downloading it
 """
@@ -249,43 +251,79 @@ def find_section(page, config):
     raise RuntimeError(f"Found '{config['section_text']}' but no patients under it")
 
 
-def row_text(element):
-    row = element.locator("xpath=ancestor-or-self::*[self::tr or self::li][1]")
-    target = row if row.count() else element
-    return " ".join(target.inner_text().split())
+def patient_name(el):
+    """The patient's name for a link or download button in the patient list."""
+    if el.evaluate("e => e.tagName") == "A" and "download" not in el.inner_text().lower():
+        text = el.inner_text()  # a patient link: its text is the name
+    else:
+        row = el.locator("xpath=ancestor-or-self::*[self::tr or self::li][1]")
+        first_cell = row.locator("td, th").first
+        if row.count() and first_cell.count():
+            text = first_cell.inner_text()
+        elif row.count():
+            text = row.inner_text().replace(el.inner_text(), " ")
+        else:
+            text = el.inner_text()
+    return " ".join(text.split()) or "Unknown patient"
 
 
-def collect_items(page, section, config):
-    """Return [(key, label, element)] for each patient in the section.
+def row_label(el):
+    row = el.locator("xpath=ancestor-or-self::*[self::tr or self::li][1]")
+    return " ".join((row if row.count() else el).inner_text().split())
 
-    If the list has download buttons, each one is an item. Otherwise each
-    patient link is an item and the patient's page is searched for downloads.
+
+def image_key(page, el, fallback):
+    """A stable id for one downloadable image, so it's only fetched once."""
+    href = el.get_attribute("href")
+    if href and not href.startswith(("#", "javascript")):
+        return urljoin(page.url, href)
+    return fallback
+
+
+def iter_images(page, section, config):
+    """Yield (key, patient name, page, element) for every image on offer.
+
+    If the patient list has download buttons, each is an image. Otherwise each
+    patient's page is opened and every download button there is an image, so
+    new images for a returning patient are picked up too.
     """
     sel = config["selectors"]
-    downloads = section.locator(sel["download"] or DOWNLOAD_SELECTOR)
-    items = []
+    download_sel = sel["download"] or DOWNLOAD_SELECTOR
+    downloads = section.locator(download_sel)
     if downloads.count():
+        seen = {}
         for i in range(downloads.count()):
             el = downloads.nth(i)
-            label = row_text(el)
-            href = el.get_attribute("href")
-            key = urljoin(page.url, href) if href and not href.startswith(("#", "javascript")) else label
-            items.append((key, label, el, "download"))
-        return items
+            label = row_label(el)
+            seen[label] = seen.get(label, 0) + 1
+            yield image_key(page, el, f"{page.url}#{label}#{seen[label]}"), patient_name(el), page, el
+        return
 
     links = section.locator(sel["patient_link"] or "a[href]")
-    seen = set()
+    patients = {}
     for i in range(links.count()):
         el = links.nth(i)
         href = el.get_attribute("href") or ""
-        if href.startswith(("#", "javascript", "mailto")):
-            continue
-        key = urljoin(page.url, href)
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append((key, row_text(el), el, "patient"))
-    return items
+        if not href.startswith(("#", "javascript", "mailto")):
+            patients.setdefault(urljoin(page.url, href), patient_name(el))
+
+    for url, name in patients.items():
+        patient_page = page.context.new_page()
+        try:
+            patient_page.goto(url, wait_until="networkidle")
+            buttons = patient_page.locator(download_sel)
+            if buttons.count() == 0:
+                log.warning("No download buttons found for %s (%s)", name, url)
+            seen = {}
+            for i in range(buttons.count()):
+                el = buttons.nth(i)
+                # Buttons without a link are told apart by their label (and the
+                # row they're in), not their position, which shifts as images are added.
+                label = row_label(el)
+                seen[label] = seen.get(label, 0) + 1
+                yield image_key(patient_page, el, f"{url}#{label}#{seen[label]}"), name, patient_page, el
+        finally:
+            patient_page.close()
 
 
 def unique_path(folder, name):
@@ -308,8 +346,8 @@ def filename_from_response(response, url):
     return unquote(Path(urlparse(url).path).name) or "download"
 
 
-def download_element(page, el, folder, timeout_ms):
-    """Download what one link/button points at. Returns the saved path."""
+def download_element(page, el, folder, prefix, timeout_ms):
+    """Download what one link/button points at, named "<prefix> - <original name>"."""
     href = el.get_attribute("href")
     if el.evaluate("e => e.tagName") == "A" and href and not href.startswith(("#", "javascript")):
         url = urljoin(page.url, href)
@@ -317,30 +355,16 @@ def download_element(page, el, folder, timeout_ms):
         if not response.ok:
             raise RuntimeError(f"Download failed ({response.status}) for {url}")
         if "text/html" not in response.headers.get("content-type", ""):
-            path = unique_path(folder, filename_from_response(response, url))
+            path = unique_path(folder, f"{prefix} - {filename_from_response(response, url)}")
             path.write_bytes(response.body())
             return path
     # A button, or a link that goes through a page: click it and catch the download.
     with page.expect_download(timeout=timeout_ms) as info:
         el.click()
     download = info.value
-    path = unique_path(folder, download.suggested_filename)
+    path = unique_path(folder, f"{prefix} - {download.suggested_filename}")
     download.save_as(path)
     return path
-
-
-def download_patient(page, el, folder, config, timeout_ms):
-    """Open a patient's page and download every file offered there."""
-    url = urljoin(page.url, el.get_attribute("href"))
-    patient = page.context.new_page()
-    try:
-        patient.goto(url, wait_until="networkidle")
-        buttons = patient.locator(config["selectors"]["download"] or DOWNLOAD_SELECTOR)
-        if buttons.count() == 0:
-            raise RuntimeError(f"No download buttons found on patient page {url}")
-        return [download_element(patient, buttons.nth(i), folder, timeout_ms) for i in range(buttons.count())]
-    finally:
-        patient.close()
 
 
 # --- main --------------------------------------------------------------------
@@ -359,35 +383,33 @@ def sync(config, headed=False, dry_run=False, mark_existing=False):
         try:
             login(page, config, username, password)
             section = find_section(page, config)
-            items = collect_items(page, section, config)
-            new = [item for item in items if item[0] not in state["downloaded"]]
-            log.info("%d patients listed, %d new", len(items), len(new))
+            today = datetime.now().strftime("%Y-%m-%d")
 
-            saved = 0
-            for key, label, el, kind in new:
-                if dry_run:
-                    log.info("Would download: %s", label)
+            listed = saved = 0
+            for key, name, owner, el in iter_images(page, section, config):
+                listed += 1
+                if key in state["downloaded"]:
                     continue
-                if mark_existing:
-                    files = []
-                elif kind == "download":
-                    files = [download_element(page, el, folder, timeout_ms)]
-                else:
-                    files = download_patient(page, el, folder, config, timeout_ms)
-                for f in files:
-                    log.info("Saved %s", f)
-                saved += len(files)
+                if dry_run:
+                    log.info("Would download an image for %s", name)
+                    continue
+                file = None
+                if not mark_existing:
+                    file = download_element(owner, el, folder, f"{name} - {today}", timeout_ms)
+                    log.info("Saved %s", file)
+                    saved += 1
                 state["downloaded"][key] = {
-                    "label": label,
+                    "patient": name,
                     "at": datetime.now().isoformat(timespec="seconds"),
-                    "files": [f.name for f in files],
+                    "file": file.name if file else None,
                 }
                 save_state(state)
 
+            log.info("%d images listed", listed)
             if mark_existing:
-                log.info("Marked %d patients as already downloaded", len(new))
+                log.info("Marked all current images as already downloaded")
             elif not dry_run:
-                log.info("Done: %d new files in %s", saved, folder)
+                log.info("Done: %d new images saved in %s", saved, folder)
         except Exception:
             shot = data_dir() / f"error-{datetime.now():%Y%m%d-%H%M%S}.png"
             try:
