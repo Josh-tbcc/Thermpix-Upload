@@ -1,8 +1,8 @@
 {
-  "base_url": "https://usatherm.com/",
+  "base_url": "https://app.thermpix.com/",
   "folder_name": "DPAs",
   "patients_link_text": "Patients",
-  "patients_url": null,
+  "patients_url": "https://app.thermpix.com/patients/patients",
   "max_list_pages": 200,
   "headless": true,
   "timeout_seconds": 60,

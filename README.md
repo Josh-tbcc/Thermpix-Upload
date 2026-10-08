@@ -1,6 +1,6 @@
 # Thermpix DPA Sync
 
-Every day at 7pm this logs into Thermpix (https://usatherm.com/), goes through
+Every day at 7pm this logs into Thermpix (https://app.thermpix.com/), goes through
 every patient under **Patients**, and downloads any image that hasn't been
 downloaded before into a folder called **DPAs** on your Desktop. That covers new
 patients and new images for returning patients. Each file is named after the
@@ -41,7 +41,7 @@ saved next to it (`error-<date>.png`).
 
 ## If it can't find things on the page
 
-The script finds the login boxes, the Patients menu link, the patient list (including
+The script finds the login boxes, the patient list (including
 its "Next" pages) and the download buttons by itself. If Thermpix's layout trips it up, copy
 `config.example.json` to `config.json` and fill in the CSS selector for the part
 it gets wrong, e.g. `"download": "a.btn-download"`. Any field left as `null` keeps

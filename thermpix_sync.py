@@ -1,4 +1,4 @@
-"""Download new patient images from Thermpix (usatherm.com) into Desktop\\DPAs.
+"""Download new patient images from Thermpix (app.thermpix.com) into Desktop\\DPAs.
 
 Logs in with the username/password saved in Windows Credential Manager,
 opens the full patient list and checks every patient's page, downloading
@@ -39,14 +39,14 @@ KEYRING_SERVICE = "ThermpixSync"
 HERE = Path(__file__).resolve().parent
 
 DEFAULTS = {
-    "base_url": "https://usatherm.com/",
+    "base_url": "https://app.thermpix.com/",
     # Folder name created on the Desktop. Set "output_dir" to a full path to override.
     "folder_name": "DPAs",
     "output_dir": None,
     # Menu link that opens the full patient list, and an optional direct URL
     # for that list if the menu link can't be found.
     "patients_link_text": "Patients",
-    "patients_url": None,
+    "patients_url": "https://app.thermpix.com/patients/patients",
     # Safety limit on how many pages of the patient list to walk through.
     "max_list_pages": 200,
     "headless": True,
@@ -90,6 +90,7 @@ LOGIN_LINK_SELECTORS = [
     "button:has-text('Login')",
     "button:has-text('Sign in')",
 ]
+ROW_SELECTOR = "tbody tr, mat-row, [role=row]"
 NEXT_PAGE_SELECTORS = [
     "a[rel=next]",
     "[aria-label*=next i]",
@@ -291,7 +292,7 @@ def patient_links_on_page(page, config):
     else:
         # The first link in each table row / list item of the main content.
         candidates = page.locator(
-            "xpath=//*[self::tr or self::li][not(ancestor::nav or ancestor::header "
+            "xpath=//*[self::tr or self::li or @role='row'][not(ancestor::nav or ancestor::header "
             "or ancestor::footer or ancestor::aside)]/descendant::a[@href][1]"
         )
     patients = {}
@@ -307,25 +308,88 @@ def patient_links_on_page(page, config):
     return patients
 
 
+def data_rows(page):
+    """The patient rows in the list table (header rows left out)."""
+    rows = page.locator(ROW_SELECTOR)
+    return [rows.nth(i) for i in range(rows.count())
+            if rows.nth(i).is_visible() and rows.nth(i).locator("th, [role=columnheader]").count() == 0]
+
+
+def first_row_text(page):
+    rows = data_rows(page)
+    return rows[0].inner_text() if rows else ""
+
+
+def wait_for_rows(page, config):
+    deadline = time.monotonic() + config["timeout_seconds"]
+    while not data_rows(page) and time.monotonic() < deadline:
+        page.wait_for_timeout(500)
+
+
+def click_next(page, config):
+    """Go to the next page of the patient list. False when there isn't one."""
+    next_link = first_visible(page, [config["selectors"]["next_page"]] + NEXT_PAGE_SELECTORS)
+    if not next_link or next_link.get_attribute("disabled") is not None or \
+            next_link.get_attribute("aria-disabled") == "true" or \
+            "disabled" in (next_link.get_attribute("class") or ""):
+        return False
+    before = first_row_text(page)
+    next_link.click()
+    page.wait_for_load_state("networkidle")
+    # In a web app the rows change without a page load, so wait for them to.
+    deadline = time.monotonic() + 15
+    while first_row_text(page) == before and time.monotonic() < deadline:
+        page.wait_for_timeout(300)
+    return first_row_text(page) != before
+
+
+def patients_by_clicking_rows(page, config, page_number):
+    """{url: name} for list rows that open the patient when clicked (no links)."""
+    patients = {}
+    page_start = first_row_text(page)
+    count = len(data_rows(page))
+    for i in range(count):
+        rows = data_rows(page)
+        if i >= len(rows):
+            break
+        row = rows[i]
+        first_cell = row.locator("td, [role=cell], [role=gridcell], mat-cell").first
+        name = " ".join((first_cell if first_cell.count() else row).inner_text().split())
+        before = page.url
+        (first_cell if first_cell.count() else row).click()
+        try:
+            page.wait_for_url(lambda url: url != before, timeout=10000)
+        except PlaywrightTimeout:
+            continue  # this row doesn't open anything
+        page.wait_for_load_state("networkidle")
+        patients.setdefault(page.url, name or "Unknown patient")
+        page.go_back()
+        page.wait_for_load_state("networkidle")
+        wait_for_rows(page, config)
+        # Some lists jump back to page 1 after going back; return to our page.
+        if first_row_text(page) != page_start:
+            for _ in range(page_number - 1):
+                click_next(page, config)
+    return patients
+
+
 def all_patients(page, config):
     """Walk every page of the patient list and return {url: name}."""
     open_patient_list(page, config)
+    wait_for_rows(page, config)
     patients = {}
     for page_number in range(1, config["max_list_pages"] + 1):
-        found = patient_links_on_page(page, config)
+        found = patient_links_on_page(page, config) or patients_by_clicking_rows(page, config, page_number)
         new = {url: name for url, name in found.items() if url not in patients}
         patients.update(new)
         log.info("Patient list page %d: %d patients", page_number, len(found))
-        if not new:
-            break  # same page again: we've run out of pages
-        next_link = first_visible(page, [config["selectors"]["next_page"]] + NEXT_PAGE_SELECTORS)
-        if not next_link or next_link.get_attribute("disabled") is not None or \
-                "disabled" in (next_link.get_attribute("class") or ""):
+        if not new or not click_next(page, config):
             break
-        next_link.click()
-        page.wait_for_load_state("networkidle")
     if not patients:
-        raise RuntimeError(f"No patients found on the patient list page ({page.url})")
+        raise RuntimeError(
+            f"No patients found on the patient list page ({page.url}): "
+            f"{len(data_rows(page))} table rows, {page.locator('a[href]').count()} links"
+        )
     return patients
 
 

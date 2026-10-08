@@ -28,6 +28,21 @@ def dashboard():
     return f"<html><body>{MENU}<h3>Recently Created Patients</h3></body></html>"
 
 
+def patient_rows(patients, page):
+    """A list whose rows open the patient when clicked, with no links."""
+    ids = list(patients)
+    chunk = ids[(page - 1) * PER_PAGE: page * PER_PAGE]
+    rows = "".join(
+        f'<tr onclick="location=\'/patient/{pid}\'"><td>{patients[pid]}</td><td>01/01/1980</td></tr>'
+        for pid in chunk
+    )
+    more = page * PER_PAGE < len(ids)
+    nxt = (f'<button aria-label="Next page" onclick="location=\'/rows?page={page + 1}\'">&gt;</button>' if more
+           else '<button aria-label="Next page" disabled>&gt;</button>')
+    return (f"<html><body>{MENU}<table><thead><tr><th>Name</th><th>DOB</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>{nxt}</body></html>")
+
+
 def patient_list(patients, page):
     ids = list(patients)
     chunk = ids[(page - 1) * PER_PAGE: page * PER_PAGE]
@@ -65,6 +80,9 @@ def make_handler(site):
             if not self.logged_in():
                 self.send_response(403)
                 return self.end_headers()
+            if self.path.startswith("/rows"):
+                page = int(self.path.split("page=")[1]) if "page=" in self.path else 1
+                return self.send(patient_rows(site["patients"], page))
             if self.path.startswith("/patients"):
                 page = int(self.path.split("page=")[1]) if "page=" in self.path else 1
                 return self.send(patient_list(site["patients"], page))
@@ -112,7 +130,7 @@ def site(tmp_path, monkeypatch):
     monkeypatch.setenv("THERMPIX_PASSWORD", "secret")
     config = thermpix_sync.load_config()
     config.update(base_url=f"http://127.0.0.1:{server.server_port}/",
-                  output_dir=str(tmp_path / "DPAs"), timeout_seconds=10)
+                  output_dir=str(tmp_path / "DPAs"), timeout_seconds=10, patients_url=None)
     state["config"] = config
     state["out"] = tmp_path / "DPAs"
     yield state
@@ -137,6 +155,13 @@ def test_downloads_every_patient_across_pages(site):
 
     thermpix_sync.sync(site["config"])  # nothing new
     assert len(files(site["out"])) == 6
+
+
+def test_clickable_rows_without_links(site):
+    site["config"]["patients_url"] = "/rows"
+    thermpix_sync.sync(site["config"])
+    assert len(files(site["out"])) == 6
+    assert f"Mary Jones - {TODAY} - c1.jpg" in files(site["out"])
 
 
 def test_returning_patient_gets_only_new_images(site):
