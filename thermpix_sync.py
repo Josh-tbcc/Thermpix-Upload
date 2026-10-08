@@ -650,6 +650,7 @@ DESCRIBE_JS = """
     if (n.nodeType !== 1) return "";
     const tag = n.tagName.toLowerCase();
     if (["script", "style", "path", "g"].includes(tag)) return "";
+    if (tag === "svg") return `${pad}<svg>\\n`;
     const keep = keepText || ICON(n) || n.matches("th, [role=columnheader], mat-header-cell") ||
       (n.matches("button, [role=button]") && SAFE_WORDS.test(n.textContent.trim()));
     let out = `${pad}<${tag}${attrs(n)}>\\n`;
@@ -712,13 +713,28 @@ def inspect(config, headed=True):
                 print("--- patient file: Images section ---")
                 print("found Images:", open_images_tab(page, config),
                       "->", re.sub(r"\d+", "N", urlparse(page.url).path))
-                # Describe a pop-up if one opened, otherwise the main page area.
-                area = page.locator("mat-dialog-container, [role=dialog], mat-drawer.mat-drawer-opened").first
+                page.wait_for_timeout(3000)
+                # The images part of the patient file (not the side panel with
+                # the patient's photo, name and menu).
+                area = page.locator(".layout-ov-page > :not(.layout-ov-page__aside)")
                 if not area.count():
-                    area = page.locator("main, [role=main], mat-sidenav-content, .content").first
-                if not area.count():
-                    area = page.locator("body")
-                print(area.evaluate(DESCRIBE_JS)[:8000])
+                    area = page.locator("mat-dialog-container, [role=dialog], main, body").first
+                for selector in ["img", "canvas", "a[href]", "a[download]", "button", "mat-card, sc-card",
+                                 "[class*=thumb]", "[class*=image]", "[class*=site]", "[aria-label*=download i]"]:
+                    print(f"in images area, count {selector}: "
+                          f"{sum(area.nth(i).locator(selector).count() for i in range(area.count()))}")
+                for i in range(area.count()):
+                    imgs = area.nth(i).locator("img")
+                    for j in range(min(imgs.count(), 5)):
+                        # Only the shape of the address: file names could include patient details.
+                        src = urlparse(urljoin(page.url, imgs.nth(j).get_attribute("src") or ""))
+                        parts = [x for x in src.path.split("/") if x]
+                        print(f"  image address: {src.scheme}://{src.netloc}/{parts[0] if parts else ''}/..."
+                              f" ({len(parts)} parts, ends {Path(src.path).suffix or 'with no extension'}"
+                              f"{', has ?query' if src.query else ''})")
+                print("--- images area ---")
+                for i in range(area.count()):
+                    print(area.nth(i).evaluate(DESCRIBE_JS)[:15000])
             print("===== COPY TO HERE =====\n")
         finally:
             browser.close()
