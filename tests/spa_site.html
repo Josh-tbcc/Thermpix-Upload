@@ -31,6 +31,12 @@ async function render() {
   }
   const data = await (await fetch("/api/data", { headers: { Authorization: token } })).json();
   if (path === "/dashboard") { app.innerHTML = menu + "<h3>Recently Created Patients</h3>"; return; }
+  if (path === "/patients/patients" && !window.listLoaded) {
+    app.innerHTML = menu + `<table><tbody><tr><td>Loading...</td></tr></tbody></table>`;
+    window.listLoaded = true;
+    setTimeout(render, 1500);
+    return;
+  }
   if (path === "/patients/patients") {
     const ids = Object.keys(data.patients);
     const chunk = ids.slice((listPage - 1) * PER_PAGE, listPage * PER_PAGE);

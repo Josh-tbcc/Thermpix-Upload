@@ -389,8 +389,20 @@ def first_row_text(page):
 
 
 def wait_for_rows(page, config):
+    """Wait for the list to finish loading: rows present and not changing for 3 seconds.
+
+    Web apps often show a single "loading" row first and fill in the real
+    patients a moment later.
+    """
     deadline = time.monotonic() + config["timeout_seconds"]
-    while not data_rows(page) and time.monotonic() < deadline:
+    last, stable_since = None, time.monotonic()
+    while time.monotonic() < deadline:
+        rows = data_rows(page)
+        snapshot = (len(rows), rows[0].inner_text() if rows else "")
+        if snapshot != last:
+            last, stable_since = snapshot, time.monotonic()
+        elif rows and time.monotonic() - stable_since >= 3:
+            return
         page.wait_for_timeout(500)
 
 
@@ -444,6 +456,9 @@ def patients_by_clicking_rows(page, config, page_number):
     columns = name_columns(page)
     page_start = first_row_text(page)
     count = len(data_rows(page))
+    log.info("%d rows in the list; opening each with %s", count,
+             "the book icon" if data_rows(page) and data_rows(page)[0].locator(
+                 config["selectors"]["open_patient"] or BOOK_ICON_SELECTOR).count() else "a click on the row")
     for i in range(count):
         rows = data_rows(page)
         if i >= len(rows):
@@ -455,6 +470,7 @@ def patients_by_clicking_rows(page, config, page_number):
         try:
             page.wait_for_url(lambda url: url != before, timeout=10000)
         except PlaywrightTimeout:
+            log.info("Row %d of %d didn't open a patient file", i + 1, count)
             if i >= 2 and not patients:
                 raise RuntimeError("Clicking the patients in the list doesn't open their file")
             continue  # this row doesn't open anything
