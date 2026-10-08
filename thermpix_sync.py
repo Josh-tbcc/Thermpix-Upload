@@ -26,6 +26,7 @@ import os
 import re
 import sys
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -46,13 +47,18 @@ DEFAULTS = {
     # Menu link that opens the full patient list, and an optional direct URL
     # for that list if the menu link can't be found.
     "patients_link_text": "Patients",
-    # Section of the patient file that holds the images.
+    # Section of the patient file that holds the images, and the buttons used
+    # there: "Select image" turns on the checkboxes, "Download" fetches the ticked ones.
     "images_tab_text": "Images",
+    "select_text": "select( images?)?",
+    "download_text": "download",
     "patients_url": "/patients/patients",
     # Safety limit on how many pages of the patient list to walk through.
     "max_list_pages": 200,
     "headless": True,
     "timeout_seconds": 60,
+    # How long to wait for buttons and sections to appear in the app.
+    "ui_wait_seconds": 10,
     # Optional CSS selectors. Leave null to let the script find things itself;
     # fill them in only if the automatic detection picks the wrong element.
     "selectors": {
@@ -287,7 +293,7 @@ def on_login_page(page):
     return "login" in urlparse(page.url).path.lower()
 
 
-def app_navigate(page, url):
+def app_navigate(page, url, config):
     """Open a page inside the web app without reloading it.
 
     Thermpix only remembers the login while you stay inside the app, so typing
@@ -305,7 +311,7 @@ def app_navigate(page, url):
         path,
     )
     page.wait_for_load_state("networkidle")
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + config["ui_wait_seconds"] / 2
     while page.locator("body").inner_text() == before and time.monotonic() < deadline:
         page.wait_for_timeout(250)
     if page.locator("body").inner_text() == before:
@@ -343,13 +349,13 @@ def find_menu_item(page, config, wait_seconds):
 
 def open_patient_list(page, config):
     """Go from the dashboard to the page listing all patients."""
-    link = find_menu_item(page, config, wait_seconds=15)
+    link = find_menu_item(page, config, wait_seconds=config["ui_wait_seconds"])
     if link:
         link.click()
         page.wait_for_load_state("networkidle")
     elif config["patients_url"]:
         log.info("No '%s' menu item found; opening %s directly", config["patients_link_text"], config["patients_url"])
-        app_navigate(page, config["patients_url"])
+        app_navigate(page, config["patients_url"], config)
     else:
         raise RuntimeError(f"Couldn't find the '{config['patients_link_text']}' menu item")
     if on_login_page(page):
@@ -422,7 +428,7 @@ def click_next(page, config):
     next_link.click()
     page.wait_for_load_state("networkidle")
     # In a web app the rows change without a page load, so wait for them to.
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + config["ui_wait_seconds"]
     while first_row_text(page) == before and time.monotonic() < deadline:
         page.wait_for_timeout(300)
     return first_row_text(page) != before
@@ -535,7 +541,7 @@ def open_images_tab(page, config):
         pattern = re.compile(rf"^\s*{re.escape(config['images_tab_text'])}\b", re.I)
         candidates = [page.get_by_role(role, name=pattern) for role in ("tab", "link", "button", "menuitem")]
         candidates.append(page.get_by_text(re.compile(rf"^\s*{re.escape(config['images_tab_text'])}\s*$", re.I)))
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + config["ui_wait_seconds"]
     while time.monotonic() < deadline:
         for locator in candidates:
             for i in range(locator.count()):
@@ -549,27 +555,140 @@ def open_images_tab(page, config):
     return False
 
 
-def iter_images(page, patients, config):
-    """Yield (key, patient name, page, element) for every download on each patient's page."""
-    download_sel = config["selectors"]["download"] or DOWNLOAD_SELECTOR
-    for url, name in patients.items():
-        app_navigate(page, url)
-        open_images_tab(page, config)
-        buttons = page.locator(download_sel)
-        # The app draws the page after loading its data, so give it a moment.
-        deadline = time.monotonic() + 10
-        while buttons.count() == 0 and time.monotonic() < deadline:
-            page.wait_for_timeout(500)
-        if buttons.count() == 0:
-            log.warning("No download buttons found for %s (%s)", name, urlparse(url).path)
-        seen = {}
-        for i in range(buttons.count()):
-            el = buttons.nth(i)
-            # Buttons without a link are told apart by their label (and the
-            # row they're in), not their position, which shifts as images are added.
-            label = row_label(el)
+def images_area(page):
+    """The main part of the patient file, without the side panel (photo, name, menu)."""
+    area = page.locator(".layout-ov-page > :not(.layout-ov-page__aside)")
+    if area.count():
+        return area
+    for selector in ("main", "body"):
+        if page.locator(selector).count():
+            return page.locator(selector).first
+    return page.locator("body")
+
+
+def find_visible(page, candidates, wait_seconds):
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        for locator in candidates:
+            for i in range(locator.count()):
+                el = locator.nth(i)
+                if el.is_visible() and el.is_enabled():
+                    return el
+        if time.monotonic() > deadline:
+            return None
+        page.wait_for_timeout(500)
+
+
+def button_named(page, words, wait_seconds):
+    """A visible, enabled button/menu entry whose name is `words` (an icon name may come first)."""
+    name = re.compile(rf"^\s*(\w+\s+)?{words}\s*$", re.I)
+    candidates = [page.get_by_role(role, name=name) for role in ("button", "menuitem", "tab", "link")]
+    candidates.append(page.get_by_text(re.compile(rf"^\s*{words}\s*$", re.I)))
+    return find_visible(page, candidates, wait_seconds)
+
+
+def save_download(download, folder, prefix):
+    """Save a browser download as "<prefix> - <name>"; unpack zips into separate images."""
+    name = download.suggested_filename
+    if not name.lower().endswith(".zip"):
+        path = unique_path(folder, f"{prefix} - {name}")
+        download.save_as(path)
+        return [path]
+    tmp = data_dir() / "last-download.zip"
+    download.save_as(tmp)
+    saved = []
+    with zipfile.ZipFile(tmp) as z:
+        for member in z.infolist():
+            if member.is_dir():
+                continue
+            path = unique_path(folder, f"{prefix} - {Path(member.filename).name}")
+            path.write_bytes(z.read(member))
+            saved.append(path)
+    tmp.unlink()
+    return saved
+
+
+def iter_selectable_images(page, url, name, config, timeout_ms):
+    """Images that are downloaded via "Select image", ticking the image, then "Download".
+
+    Yields (key, download) per image; download(prefix) ticks just that image,
+    presses Download, saves the file(s) and unticks it again.
+    """
+    select = button_named(page, config["select_text"], wait_seconds=config["ui_wait_seconds"])
+    if not select:
+        return
+    select.click()
+    page.wait_for_timeout(1000)
+    area = images_area(page)
+    boxes = [area.nth(a).locator("input[type=checkbox]").nth(b)
+             for a in range(area.count()) for b in range(area.nth(a).locator("input[type=checkbox]").count())]
+    if not boxes:
+        log.info("No images for %s", name)
+        return
+    seen = {}
+    for box in boxes:
+        # The image's card: the largest area around the checkbox holding no other checkbox.
+        card = box.locator("xpath=ancestor::*[count(.//input[@type='checkbox'])=1][last()]")
+        picture = card.locator("img, canvas").first
+        if not picture.count():
+            continue  # e.g. a "select all" box
+        src = picture.get_attribute("src") or ""
+        if src and not src.startswith(("data:", "blob:")):
+            key = f"{url}|{urlparse(urljoin(page.url, src)).path}"
+        else:
+            label = " ".join(card.inner_text().split())
             seen[label] = seen.get(label, 0) + 1
-            yield image_key(page, el, f"{url}#{label}#{seen[label]}"), name, page, el
+            key = f"{url}|{label}#{seen[label]}"
+
+        def download(prefix, box=box):
+            box.check(force=True)
+            button = button_named(page, config["download_text"], wait_seconds=config["ui_wait_seconds"])
+            if not button:
+                raise RuntimeError(f"No '{config['download_text']}' button after ticking an image")
+            with page.expect_download(timeout=timeout_ms) as info:
+                button.click()
+            files = save_download(info.value, output_dir(config), prefix)
+            box.uncheck(force=True)
+            return files
+
+        yield key, download
+
+
+def iter_download_buttons(page, url, name, config, timeout_ms):
+    """Images offered as download links/buttons directly on the page."""
+    buttons = page.locator(config["selectors"]["download"] or DOWNLOAD_SELECTOR)
+    # The app draws the page after loading its data, so give it a moment.
+    deadline = time.monotonic() + config["ui_wait_seconds"]
+    while buttons.count() == 0 and time.monotonic() < deadline:
+        page.wait_for_timeout(500)
+    if buttons.count() == 0:
+        log.warning("No images found for %s (%s)", name, urlparse(url).path)
+    seen = {}
+    for i in range(buttons.count()):
+        el = buttons.nth(i)
+        # Buttons without a link are told apart by their label (and the
+        # row they're in), not their position, which shifts as images are added.
+        label = row_label(el)
+        seen[label] = seen.get(label, 0) + 1
+
+        def download(prefix, el=el):
+            return [download_element(page, el, output_dir(config), prefix, timeout_ms)]
+
+        yield image_key(page, el, f"{url}#{label}#{seen[label]}"), download
+
+
+def iter_images(page, patients, config, timeout_ms):
+    """Yield (key, patient name, download) for every image of every patient."""
+    for url, name in patients.items():
+        app_navigate(page, url, config)
+        open_images_tab(page, config)
+        found = False
+        for key, download in iter_selectable_images(page, url, name, config, timeout_ms):
+            found = True
+            yield key, name, download
+        if not found:
+            for key, download in iter_download_buttons(page, url, name, config, timeout_ms):
+                yield key, name, download
 
 
 def unique_path(folder, name):
@@ -732,6 +851,15 @@ def inspect(config, headed=True):
                         print(f"  image address: {src.scheme}://{src.netloc}/{parts[0] if parts else ''}/..."
                               f" ({len(parts)} parts, ends {Path(src.path).suffix or 'with no extension'}"
                               f"{', has ?query' if src.query else ''})")
+                select = button_named(page, config["select_text"], wait_seconds=config["ui_wait_seconds"])
+                print("found Select image:", bool(select))
+                if select:
+                    select.click()
+                    page.wait_for_timeout(2000)
+                    area = images_area(page)
+                    boxes = sum(area.nth(i).locator("input[type=checkbox]").count() for i in range(area.count()))
+                    print("checkboxes after Select image:", boxes,
+                          "| Download button:", bool(button_named(page, config["download_text"], wait_seconds=3)))
                 print("--- images area ---")
                 for i in range(area.count()):
                     print(area.nth(i).evaluate(DESCRIBE_JS)[:15000])
@@ -760,22 +888,23 @@ def sync(config, headed=False, dry_run=False, mark_existing=False):
             today = datetime.now().strftime("%Y-%m-%d")
 
             listed = saved = 0
-            for key, name, owner, el in iter_images(page, patients, config):
+            for key, name, download in iter_images(page, patients, config, timeout_ms):
                 listed += 1
                 if key in state["downloaded"]:
                     continue
                 if dry_run:
                     log.info("Would download an image for %s", name)
                     continue
-                file = None
+                files = []
                 if not mark_existing:
-                    file = download_element(owner, el, folder, f"{name} - {today}", timeout_ms)
-                    log.info("Saved %s", file)
-                    saved += 1
+                    files = download(f"{name} - {today}")
+                    for f in files:
+                        log.info("Saved %s", f)
+                    saved += len(files)
                 state["downloaded"][key] = {
                     "patient": name,
                     "at": datetime.now().isoformat(timespec="seconds"),
-                    "file": file.name if file else None,
+                    "files": [f.name for f in files],
                 }
                 save_state(state)
 

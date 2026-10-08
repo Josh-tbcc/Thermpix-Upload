@@ -152,7 +152,8 @@ def site(tmp_path, monkeypatch):
     monkeypatch.setenv("THERMPIX_PASSWORD", "secret")
     config = thermpix_sync.load_config()
     config.update(base_url=f"http://127.0.0.1:{server.server_port}/",
-                  output_dir=str(tmp_path / "DPAs"), timeout_seconds=10, patients_url=None)
+                  output_dir=str(tmp_path / "DPAs"), timeout_seconds=10, patients_url=None,
+                  ui_wait_seconds=2)
     state["config"] = config
     state["out"] = tmp_path / "DPAs"
     yield state
@@ -247,5 +248,6 @@ def test_inspect_hides_patient_names(site, capsys):
     assert "patient row 1" in out and "address changed: True" in out
     assert "Last name" in out and "Birthday" in out  # column headings are shown
     assert 'aria-label="Details"' in out and "found Images: True" in out
+    assert "found Select image: True" in out and "checkboxes after Select image: 1" in out
     for name in ["Jane", "Citizen", "John", "Smith", "Mary", "Jones"]:
         assert name not in out

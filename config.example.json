@@ -6,6 +6,7 @@
   "max_list_pages": 200,
   "headless": true,
   "timeout_seconds": 60,
+  "ui_wait_seconds": 10,
   "selectors": {
     "login_link": null,
     "username": null,

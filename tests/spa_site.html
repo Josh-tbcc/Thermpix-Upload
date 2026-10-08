@@ -53,13 +53,29 @@ async function render() {
   }
   const m = path.match(/^\/patients\/patient\/(\w+)$/);
   if (m) {
-    const links = (data.images[m[1]] || []).map(img => `<li>Scan ${img} <a href="/files/${img}.jpg">Download</a></li>`).join("");
     app.innerHTML = menu + `<main><h1>${data.patients[m[1]]}</h1>
       <div role="tablist"><span role="tab">Overview</span> <span role="tab" id="images-tab">Images</span></div>
       <div id="tab-body">Overview of the patient</div></main>`;
-    document.getElementById("images-tab").onclick = () => {
-      document.getElementById("tab-body").innerHTML = `<ul>${links}</ul>`;
+    const imgs = data.images[m[1]] || [];
+    const drawImages = (selecting) => {
+      const cards = imgs.map(img => `<sc-card class="image-card">
+          ${selecting ? `<mat-checkbox><input type="checkbox" class="cdk-visually-hidden" value="${img}"
+            style="position:absolute;width:1px;height:1px;opacity:0"></mat-checkbox>` : ""}
+          <img src="/files/${img}.jpg" width="80" height="60"><span>08/10/2026</span></sc-card>`).join("");
+      document.getElementById("tab-body").innerHTML = `<div class="toolbar">
+          <button id="select"><mat-icon>check_box</mat-icon> Select image</button>
+          <button id="download" ${selecting ? "" : "disabled"}><mat-icon>download</mat-icon> Download</button>
+        </div><div class="images">${cards}</div>`;
+      document.getElementById("select").onclick = () => drawImages(true);
+      document.getElementById("download").onclick = () => {
+        const ticked = [...document.querySelectorAll(".images input:checked")].map(b => b.value);
+        if (ticked.length !== 1) { alert("tick exactly one image"); return; }
+        const a = document.createElement("a");
+        a.href = `/files/${ticked[0]}.jpg`; a.download = `${ticked[0]}.jpg`;
+        document.body.appendChild(a); a.click(); a.remove();
+      };
     };
+    document.getElementById("images-tab").onclick = () => drawImages(false);
   }
 }
 render();
