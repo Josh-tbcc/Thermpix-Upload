@@ -1,0 +1,50 @@
+<!doctype html>
+<html><body><div id="app"></div>
+<script>
+// A fake single-page app like Thermpix: the login lives only in memory, so
+// loading any address directly lands back on the login page.
+let token = null;
+let listPage = 1;
+const PER_PAGE = 2;
+const app = document.getElementById("app");
+const menu = `<nav><span onclick="nav('/dashboard')">Dashboard</span> <span>Entities</span>
+  <span>Clinics</span> <span>Users</span> <span id="menu-patients" onclick="nav('/patients/patients')">Patients</span>
+  <span>Devices</span></nav>`;
+
+function nav(path) { history.pushState({}, "", path); if (path === "/patients/patients") listPage = 1; render(); }
+window.addEventListener("popstate", () => { listPage = 1; render(); });  // like a fresh component
+
+async function render() {
+  const path = location.pathname;
+  if (!token && path !== "/login") { history.replaceState({}, "", "/login"); return render(); }
+  if (path === "/login") {
+    app.innerHTML = `<form id="f"><input type="text" name="username"><input type="password" name="password">
+      <button type="submit">Sign in</button></form><div id="err"></div>`;
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const body = new URLSearchParams(new FormData(e.target)).toString();
+      const r = await fetch("/api/login", { method: "POST", body });
+      if (r.ok) { token = (await r.json()).token; nav("/dashboard"); }
+      else document.getElementById("err").innerHTML = '<div role="alert">Invalid username or password</div>';
+    };
+    return;
+  }
+  const data = await (await fetch("/api/data", { headers: { Authorization: token } })).json();
+  if (path === "/dashboard") { app.innerHTML = menu + "<h3>Recently Created Patients</h3>"; return; }
+  if (path === "/patients/patients") {
+    const ids = Object.keys(data.patients);
+    const chunk = ids.slice((listPage - 1) * PER_PAGE, listPage * PER_PAGE);
+    const rows = chunk.map(id => `<tr onclick="nav('/patients/patient/${id}')"><td>${data.patients[id]}</td><td>1980</td></tr>`).join("");
+    const more = listPage * PER_PAGE < ids.length;
+    app.innerHTML = menu + `<table><thead><tr><th>Name</th><th>DOB</th></tr></thead><tbody>${rows}</tbody></table>
+      <button aria-label="Next page" ${more ? "" : "disabled"} onclick="listPage++; render()">&gt;</button>`;
+    return;
+  }
+  const m = path.match(/^\/patients\/patient\/(\w+)$/);
+  if (m) {
+    const links = (data.images[m[1]] || []).map(img => `<li>Scan ${img} <a href="/files/${img}.jpg">Download</a></li>`).join("");
+    app.innerHTML = menu + `<h1>${data.patients[m[1]]}</h1><ul>${links}</ul>`;
+  }
+}
+render();
+</script></body></html>

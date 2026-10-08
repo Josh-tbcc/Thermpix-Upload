@@ -46,7 +46,7 @@ DEFAULTS = {
     # Menu link that opens the full patient list, and an optional direct URL
     # for that list if the menu link can't be found.
     "patients_link_text": "Patients",
-    "patients_url": "https://app.thermpix.com/patients/patients",
+    "patients_url": "/patients/patients",
     # Safety limit on how many pages of the patient list to walk through.
     "max_list_pages": 200,
     "headless": True,
@@ -268,14 +268,41 @@ def login_page_message(page):
     return "Check the saved username/password (run Install.bat again to re-enter them)."
 
 
-def open_patient_list(page, config):
-    """Go from the dashboard to the page listing all patients."""
+def on_login_page(page):
+    return "login" in urlparse(page.url).path.lower()
+
+
+def app_navigate(page, url):
+    """Open a page inside the web app without reloading it.
+
+    Thermpix only remembers the login while you stay inside the app, so typing
+    an address (a full page load) logs you out. Changing the address the way
+    the app's own links do keeps the login.
+    """
+    target = urlparse(urljoin(page.url, url))
+    path = target.path + (f"?{target.query}" if target.query else "")
+    before = page.locator("body").inner_text()
+    page.evaluate(
+        """path => {
+            history.pushState({}, '', path);
+            window.dispatchEvent(new PopStateEvent('popstate', {state: {}}));
+        }""",
+        path,
+    )
+    page.wait_for_load_state("networkidle")
+    deadline = time.monotonic() + 5
+    while page.locator("body").inner_text() == before and time.monotonic() < deadline:
+        page.wait_for_timeout(250)
+    if page.locator("body").inner_text() == before:
+        # Nothing redrew, so this is an ordinary website: load the page normally.
+        page.goto(urljoin(page.url, url), wait_until="networkidle")
+    if on_login_page(page):
+        raise RuntimeError(f"Thermpix logged us out when opening {path}")
+
+
+def find_menu_item(page, config, wait_seconds):
+    """The visible "Patients" menu item, or None."""
     sel = config["selectors"]
-    if config["patients_url"]:
-        page.goto(urljoin(page.url, config["patients_url"]), wait_until="networkidle")
-        if "login" in urlparse(page.url).path.lower():
-            raise RuntimeError("Thermpix sent us back to the login page when opening the patient list")
-        return
     pattern = re.compile(rf"^\s*(all\s+)?{re.escape(config['patients_link_text'])}\b", re.I)
     # The menu item might be a link, a button, a menu entry or just text with a
     # click handler, so try each kind until one shows up.
@@ -286,26 +313,31 @@ def open_patient_list(page, config):
         page.get_by_role("tab", name=pattern),
         page.get_by_text(pattern),
     ]
-    link = None
-    deadline = time.monotonic() + config["timeout_seconds"]
-    while link is None and time.monotonic() < deadline:
+    deadline = time.monotonic() + wait_seconds
+    while True:
         for locator in candidates:
             for i in range(locator.count()):
                 if locator.nth(i).is_visible():
-                    link = locator.nth(i)
-                    break
-            if link:
-                break
-        else:
-            page.wait_for_timeout(500)
-    if link is None:
-        raise RuntimeError(
-            f"Couldn't find the '{config['patients_link_text']}' menu link. "
-            "Set patients_url in config.json to the address of the patient list."
-        )
-    link.click()
-    page.wait_for_load_state("networkidle")
-    log.info("Opened patient list: %s", page.url)
+                    return locator.nth(i)
+        if time.monotonic() > deadline:
+            return None
+        page.wait_for_timeout(500)
+
+
+def open_patient_list(page, config):
+    """Go from the dashboard to the page listing all patients."""
+    link = find_menu_item(page, config, wait_seconds=15)
+    if link:
+        link.click()
+        page.wait_for_load_state("networkidle")
+    elif config["patients_url"]:
+        log.info("No '%s' menu item found; opening %s directly", config["patients_link_text"], config["patients_url"])
+        app_navigate(page, config["patients_url"])
+    else:
+        raise RuntimeError(f"Couldn't find the '{config['patients_link_text']}' menu item")
+    if on_login_page(page):
+        raise RuntimeError("Thermpix sent us back to the login page when opening the patient list")
+    log.info("Opened patient list: %s", urlparse(page.url).path)
 
 
 def patient_links_on_page(page, config):
@@ -434,22 +466,22 @@ def iter_images(page, patients, config):
     """Yield (key, patient name, page, element) for every download on each patient's page."""
     download_sel = config["selectors"]["download"] or DOWNLOAD_SELECTOR
     for url, name in patients.items():
-        patient_page = page.context.new_page()
-        try:
-            patient_page.goto(url, wait_until="networkidle")
-            buttons = patient_page.locator(download_sel)
-            if buttons.count() == 0:
-                log.warning("No download buttons found for %s (%s)", name, url)
-            seen = {}
-            for i in range(buttons.count()):
-                el = buttons.nth(i)
-                # Buttons without a link are told apart by their label (and the
-                # row they're in), not their position, which shifts as images are added.
-                label = row_label(el)
-                seen[label] = seen.get(label, 0) + 1
-                yield image_key(patient_page, el, f"{url}#{label}#{seen[label]}"), name, patient_page, el
-        finally:
-            patient_page.close()
+        app_navigate(page, url)
+        buttons = page.locator(download_sel)
+        # The app draws the page after loading its data, so give it a moment.
+        deadline = time.monotonic() + 10
+        while buttons.count() == 0 and time.monotonic() < deadline:
+            page.wait_for_timeout(500)
+        if buttons.count() == 0:
+            log.warning("No download buttons found for %s (%s)", name, urlparse(url).path)
+        seen = {}
+        for i in range(buttons.count()):
+            el = buttons.nth(i)
+            # Buttons without a link are told apart by their label (and the
+            # row they're in), not their position, which shifts as images are added.
+            label = row_label(el)
+            seen[label] = seen.get(label, 0) + 1
+            yield image_key(page, el, f"{url}#{label}#{seen[label]}"), name, page, el
 
 
 def unique_path(folder, name):
@@ -478,9 +510,9 @@ def download_element(page, el, folder, prefix, timeout_ms):
     if el.evaluate("e => e.tagName") == "A" and href and not href.startswith(("#", "javascript")):
         url = urljoin(page.url, href)
         response = page.request.get(url, timeout=timeout_ms)
-        if not response.ok:
-            raise RuntimeError(f"Download failed ({response.status}) for {url}")
-        if "text/html" not in response.headers.get("content-type", ""):
+        # Not allowed (the app may need its own login token) or a web page:
+        # fall through and click it like a person would instead.
+        if response.ok and "text/html" not in response.headers.get("content-type", ""):
             path = unique_path(folder, f"{prefix} - {filename_from_response(response, url)}")
             path.write_bytes(response.body())
             return path

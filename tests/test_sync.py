@@ -1,6 +1,7 @@
 """End-to-end tests against a small fake Thermpix site served locally."""
 
 import http.server
+import json
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 import thermpix_sync
 
+SPA_HTML = (Path(__file__).parent / "spa_site.html").read_text()
 PATIENTS = {"101": "Jane Citizen", "102": "John Smith", "103": "Mary Jones"}
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
@@ -73,6 +75,8 @@ def make_handler(site):
             return "session=ok" in (self.headers.get("Cookie") or "")
 
         def do_GET(self):
+            if site.get("spa"):
+                return self.spa_get()
             if self.path == "/":
                 return self.send(dashboard() if self.logged_in() else LOGIN)
             if self.path.startswith("/login"):
@@ -107,9 +111,26 @@ def make_handler(site):
             self.send_response(404)
             self.end_headers()
 
+        def spa_get(self):
+            if self.path.startswith("/files/"):
+                name = self.path.rsplit("/", 1)[1]
+                return self.send(b"JPEGDATA-" + name.encode(), "image/jpeg")
+            if self.path == "/api/data":
+                if self.headers.get("Authorization") != "tok":
+                    self.send_response(401)
+                    return self.end_headers()
+                return self.send(json.dumps({"patients": site["patients"], "images": site["images"]}),
+                                 "application/json")
+            return self.send(SPA_HTML)
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode()
+            if site.get("spa"):
+                if "username=josh" in body and "password=secret" in body:
+                    return self.send('{"token": "tok"}', "application/json")
+                self.send_response(401)
+                return self.end_headers()
             self.send_response(303)
             if "username=josh" in body and "password=secret" in body:
                 self.send_header("Set-Cookie", "session=ok; Path=/")
@@ -163,6 +184,29 @@ def test_clickable_rows_without_links(site):
     thermpix_sync.sync(site["config"])
     assert len(files(site["out"])) == 6
     assert f"Mary Jones - {TODAY} - c1.jpg" in files(site["out"])
+
+
+def test_web_app_that_logs_out_on_page_load(site):
+    """Like the real Thermpix: typing an address logs you out, so it must click through."""
+    site["spa"] = True
+    site["config"]["patients_url"] = "/patients/patients"
+    thermpix_sync.sync(site["config"])
+    assert files(site["out"]) == [
+        f"Jane Citizen - {TODAY} - a1.jpg",
+        f"John Smith - {TODAY} - b1.jpg",
+        f"Mary Jones - {TODAY} - c1.jpg",
+    ]
+    site["images"]["103"].append("c2")
+    thermpix_sync.sync(site["config"])
+    assert len(files(site["out"])) == 4
+
+
+def test_web_app_wrong_password(site, monkeypatch):
+    site["spa"] = True
+    monkeypatch.setenv("THERMPIX_PASSWORD", "nope")
+    site["config"]["timeout_seconds"] = 3
+    with pytest.raises(RuntimeError, match="Invalid username or password"):
+        thermpix_sync.sync(site["config"])
 
 
 def test_returning_patient_gets_only_new_images(site):
