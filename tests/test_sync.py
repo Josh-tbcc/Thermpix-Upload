@@ -302,3 +302,71 @@ def test_inspect_hides_patient_names(site, capsys):
     assert "found Select image: True" in out and "checkboxes after Select image: 1 | Download button: True" in out
     for name in ["Jane", "Citizen", "John", "Smith", "Mary", "Jones"]:
         assert name not in out
+
+
+class FakeSMTP:
+    sent = []
+
+    def __init__(self, server, port, timeout=None):
+        self.server = server
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def starttls(self, context=None):
+        pass
+
+    def login(self, user, password):
+        assert password == "app-pass"
+
+    def send_message(self, msg):
+        FakeSMTP.sent.append(msg)
+
+
+@pytest.fixture
+def mail(monkeypatch):
+    FakeSMTP.sent = []
+    monkeypatch.setattr(thermpix_sync.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setenv("THERMPIX_SMTP_SENDER", "clinic@thebalancedchiro.com.au")
+    monkeypatch.setenv("THERMPIX_SMTP_PASSWORD", "app-pass")
+    monkeypatch.setenv("THERMPIX_SMTP_SERVER", "smtp.gmail.com")
+    return FakeSMTP.sent
+
+
+def test_email_report_lists_saved_images(site, mail):
+    site["spa"] = True
+    site["config"]["patients_url"] = "/patients/patients"
+    report = thermpix_sync.new_report("daily sync")
+    thermpix_sync.sync(site["config"], report=report)
+    thermpix_sync.send_report(site["config"], report)
+    (msg,) = mail
+    assert msg["To"] == "yandina@thebalancedchiro.com.au"
+    assert msg["Subject"].startswith("Thermpix sync: 3 new images")
+    body = msg.get_content()
+    assert "Result: OK" in body and "Patients checked: 3" in body
+    assert f"Mary Jones - {TODAY} - c1.jpg" in body
+
+
+def test_email_report_on_failure(site, mail, monkeypatch):
+    site["spa"] = True
+    monkeypatch.setenv("THERMPIX_PASSWORD", "nope")
+    site["config"]["timeout_seconds"] = 3
+    report = thermpix_sync.new_report("daily sync")
+    with pytest.raises(RuntimeError):
+        thermpix_sync.sync(site["config"], report=report)
+    report["error"] = "Login didn't go through"
+    thermpix_sync.send_report(site["config"], report)
+    (msg,) = mail
+    assert "FAILED" in msg["Subject"]
+    assert "Login didn't go through" in msg.get_body(('plain',)).get_content()
+    assert [a.get_filename() for a in msg.iter_attachments()][0].startswith("error-")
+
+
+def test_no_email_when_not_set_up(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.delenv("THERMPIX_SMTP_SENDER", raising=False)
+    monkeypatch.setattr(thermpix_sync.keyring, "get_password", lambda *a: None)
+    assert thermpix_sync.send_email(thermpix_sync.load_config(), "s", "b") is False

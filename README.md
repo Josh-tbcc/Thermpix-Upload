@@ -12,6 +12,9 @@ patient and the date the image was taken, e.g. `Jane Citizen - 2026-10-07 - scan
   `%LOCALAPPDATA%\ThermpixSync\state.json`.
 - If the computer is off or asleep at 7pm, it runs as soon as it's back on.
 - Checking every patient takes a while if you have a lot of them, which is fine at 7pm.
+- After every run it emails a report to yandina@thebalancedchiro.com.au: whether it worked,
+  how many patients were checked and the name of every image saved (or what went wrong,
+  with a screenshot). Set it up once with `Set Up Email.bat`.
 
 ## Setup (once, about 5 minutes)
 
@@ -35,6 +38,7 @@ patient and the date the image was taken, e.g. `Jane Citizen - 2026-10-07 - scan
 | See what would download without downloading | In a command prompt in the folder: `"Run Now.bat" --dry-run` |
 | Change your Thermpix password | `.venv\Scripts\python.exe thermpix_sync.py --set-login` |
 | Get the latest version of the program | Double-click `Update.bat` |
+| Set up or change the emailed run report | Double-click `Set Up Email.bat` |
 | Stop the 7pm runs | Double-click `Uninstall.bat` |
 | Check what happened | Open `%LOCALAPPDATA%\ThermpixSync\sync.log` |
 

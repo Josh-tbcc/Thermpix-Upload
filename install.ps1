@@ -32,6 +32,14 @@ Write-Host "`n== Your Thermpix login ==" -ForegroundColor Cyan
 Write-Host "Saved in Windows Credential Manager on this computer only."
 & $venvPython (Join-Path $here "thermpix_sync.py") --set-login
 
+Write-Host "`n== Email reports ==" -ForegroundColor Cyan
+$answer = Read-Host "Email a report to yandina@thebalancedchiro.com.au after every run? (Y/N)"
+if ($answer -match '^[Yy]') {
+    & $venvPython (Join-Path $here "thermpix_sync.py") --set-email
+} else {
+    Write-Host "Skipped. You can set it up any time with Set Up Email.bat."
+}
+
 Write-Host "`n== Downloading the last 10 days of images ==" -ForegroundColor Cyan
 $state = Join-Path $env:LOCALAPPDATA "ThermpixSync\state.json"
 if (Test-Path $state) {

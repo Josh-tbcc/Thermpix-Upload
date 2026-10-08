@@ -24,10 +24,14 @@ import json
 import logging
 import os
 import re
+import smtplib
+import ssl
 import sys
 import time
+import traceback
 import zipfile
 from datetime import date, datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -56,6 +60,9 @@ DEFAULTS = {
     "patients_url": "/patients/patients",
     # Safety limit on how many pages of the patient list to walk through.
     "max_list_pages": 200,
+    # Who gets an email after every run (needs --set-email once on the computer).
+    "email_to": ["yandina@thebalancedchiro.com.au"],
+    "smtp_port": 587,
     "headless": True,
     "timeout_seconds": 60,
     # How long to wait for buttons and sections to appear in the app.
@@ -222,6 +229,112 @@ def get_login():
     if not username or not password:
         raise SystemExit("No Thermpix login saved. Run: python thermpix_sync.py --set-login")
     return username, password
+
+
+# --- email reports -----------------------------------------------------------
+
+EMAIL_SERVICE = "ThermpixSync-email"
+
+
+def default_mail_server(sender):
+    domain = sender.rsplit("@", 1)[-1].lower()
+    if domain in ("outlook.com", "hotmail.com", "live.com", "outlook.com.au", "hotmail.com.au"):
+        return "smtp.office365.com"
+    return "smtp.gmail.com"
+
+
+def email_settings():
+    sender = os.environ.get("THERMPIX_SMTP_SENDER") or keyring.get_password(EMAIL_SERVICE, "sender")
+    if not sender:
+        return None
+    server = os.environ.get("THERMPIX_SMTP_SERVER") or keyring.get_password(EMAIL_SERVICE, "server") \
+        or default_mail_server(sender)
+    password = os.environ.get("THERMPIX_SMTP_PASSWORD") or keyring.get_password(EMAIL_SERVICE, sender)
+    return {"sender": sender, "server": server, "password": password}
+
+
+def send_email(config, subject, body, attachments=()):
+    settings = email_settings()
+    if not settings:
+        log.info("Email reports aren't set up (run Set Up Email.bat); not sending")
+        return False
+    msg = EmailMessage()
+    msg["From"] = settings["sender"]
+    msg["To"] = ", ".join(config["email_to"])
+    msg["Subject"] = subject
+    msg.set_content(body)
+    for path in attachments:
+        path = Path(path)
+        if path.exists():
+            msg.add_attachment(path.read_bytes(), maintype="image", subtype="png", filename=path.name)
+    try:
+        with smtplib.SMTP(settings["server"], config["smtp_port"], timeout=60) as smtp:
+            smtp.starttls(context=ssl.create_default_context())
+            if settings["password"]:
+                smtp.login(settings["sender"], settings["password"])
+            smtp.send_message(msg)
+        log.info("Emailed the report to %s", msg["To"])
+        return True
+    except Exception as e:
+        log.error("Couldn't send the email report: %s", e)
+        return False
+
+
+def set_email(config):
+    print("Run reports will be emailed to:", ", ".join(config["email_to"]))
+    sender = input("Send them from which email address? (e.g. your clinic address): ").strip()
+    server = input(f"Mail server [press Enter for {default_mail_server(sender)}]: ").strip() \
+        or default_mail_server(sender)
+    print("\nFor a Google (Gmail / Workspace) address this is an 'app password', not your normal")
+    print("password: create one at https://myaccount.google.com/apppasswords (needs 2-Step Verification).")
+    password = getpass.getpass("App password (hidden as you type): ").replace(" ", "")
+    keyring.set_password(EMAIL_SERVICE, "sender", sender)
+    keyring.set_password(EMAIL_SERVICE, "server", server)
+    keyring.set_password(EMAIL_SERVICE, sender, password)
+    print("Saved. Sending a test email...")
+    if send_email(config, "Thermpix sync: test email",
+                  "Email reports from the Thermpix sync are working.\n"
+                  "You'll get one of these after every run."):
+        print("Test email sent - check the inbox of", ", ".join(config["email_to"]))
+    else:
+        print("The test email didn't send - see the message above. Run Set Up Email.bat to try again.")
+
+
+def new_report(mode):
+    return {"mode": mode, "started": datetime.now(), "patients": 0, "listed": 0,
+            "saved": [], "error": None, "screenshot": None}
+
+
+def send_report(config, report):
+    finished = datetime.now()
+    when = report["started"].strftime("%a %d %b %I:%M%p").replace(" 0", " ")
+    saved = report["saved"]
+    if report["error"]:
+        subject = f"Thermpix sync FAILED ({when})"
+    else:
+        subject = f"Thermpix sync: {len(saved)} new image{'s' if len(saved) != 1 else ''} ({when})"
+    lines = [
+        f"Result: {'FAILED' if report['error'] else 'OK'}",
+        f"Run: {report['mode']}",
+        f"Started: {report['started']:%d %b %Y %I:%M:%S %p}",
+        f"Finished: {finished:%d %b %Y %I:%M:%S %p} ({int((finished - report['started']).total_seconds() // 60)} min)",
+        f"Patients checked: {report['patients']}",
+        f"Images looked at: {report['listed']}",
+        f"New images saved: {len(saved)}",
+        f"Saved to: {config['output_dir'] or 'Desktop'}",
+        "",
+    ]
+    if saved:
+        lines.append("Images saved:")
+        lines += [f"  {name}" for name in saved]
+        lines.append("")
+    if report["error"]:
+        lines += ["What went wrong:", report["error"], ""]
+        log_file = data_dir() / "sync.log"
+        if log_file.exists():
+            tail = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+            lines += ["Last lines of the log:"] + tail
+    send_email(config, subject, "\n".join(lines), [report["screenshot"]] if report["screenshot"] else [])
 
 
 # --- page helpers ------------------------------------------------------------
@@ -995,13 +1108,15 @@ def try_one(config, headed=True):
 
 # --- main --------------------------------------------------------------------
 
-def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days=None):
+def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days=None, report=None):
     """Download every image not downloaded before.
 
     mark_existing: record everything as done without downloading.
     catch_up_days: download images dated within the last N days, and record
     older ones (and undated ones) as done without downloading them.
+    report: filled in with what happened, for the email.
     """
+    report = report if report is not None else new_report("sync")
     folder = output_dir(config)
     state = load_state()
     username, password = get_login()
@@ -1016,12 +1131,14 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
             login(page, config, username, password)
             patients = all_patients(page, config)
             log.info("Checking %d patients for new images", len(patients))
+            report["patients"] = len(patients)
             today = datetime.now().strftime("%Y-%m-%d")
 
             cutoff = date.today() - timedelta(days=catch_up_days) if catch_up_days is not None else None
             listed = saved = 0
             for key, name, download, dates in iter_images(page, patients, config, timeout_ms):
                 listed += 1
+                report["listed"] = listed
                 if key in state["downloaded"]:
                     continue
                 recent = [d for d in dates if cutoff is None or d >= cutoff]
@@ -1035,6 +1152,7 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                     files = download(f"{name} - {taken.isoformat() if taken else today}")
                     for f in files:
                         log.info("Saved %s", f)
+                        report["saved"].append(f.name)
                     saved += len(files)
                 state["downloaded"][key] = {
                     "patient": name,
@@ -1055,6 +1173,7 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
             shot = data_dir() / f"error-{datetime.now():%Y%m%d-%H%M%S}.png"
             try:
                 page.screenshot(path=str(shot), full_page=True)
+                report["screenshot"] = str(shot)
                 log.error("Screenshot of the page at the time of the error: %s", shot)
             except Exception:
                 pass
@@ -1072,6 +1191,7 @@ def main():
                         help="treat everything currently listed as already downloaded")
     parser.add_argument("--catch-up-days", type=int, metavar="N",
                         help="download images from the last N days; mark older ones as done")
+    parser.add_argument("--set-email", action="store_true", help="set up the emailed run reports")
     parser.add_argument("--try-one", action="store_true",
                         help="download a single image as a test (not recorded as downloaded)")
     parser.add_argument("--inspect", action="store_true",
@@ -1095,14 +1215,24 @@ def main():
         return
 
     setup_logging()
+    config = load_config()
+    if args.set_email:
+        set_email(config)
+        return
+    mode = ("catch-up of the last %d days" % args.catch_up_days if args.catch_up_days is not None
+            else "recording existing images" if args.mark_existing
+            else "dry run" if args.dry_run else "daily sync")
+    report = new_report(mode)
     try:
-        sync(load_config(), headed=args.headed, dry_run=args.dry_run, mark_existing=args.mark_existing,
-             catch_up_days=args.catch_up_days)
-    except SystemExit:
-        raise
-    except Exception:
+        sync(config, headed=args.headed, dry_run=args.dry_run, mark_existing=args.mark_existing,
+             catch_up_days=args.catch_up_days, report=report)
+    except Exception as e:
         log.exception("Sync failed")
+        report["error"] = f"{e}\n\n{traceback.format_exc()}"
         sys.exit(1)
+    finally:
+        if not args.dry_run:
+            send_report(config, report)
 
 
 if __name__ == "__main__":
