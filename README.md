@@ -33,6 +33,7 @@ patient, e.g. `Jane Citizen - 2026-10-07 - scan1.jpg`.
 | Run it now | Double-click `Run Now.bat` |
 | See what would download without downloading | In a command prompt in the folder: `"Run Now.bat" --dry-run` |
 | Change your Thermpix password | `.venv\Scripts\python.exe thermpix_sync.py --set-login` |
+| Get the latest version of the program | Double-click `Update.bat` |
 | Stop the 7pm runs | Double-click `Uninstall.bat` |
 | Check what happened | Open `%LOCALAPPDATA%\ThermpixSync\sync.log` |
 
