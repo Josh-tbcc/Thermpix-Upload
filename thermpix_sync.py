@@ -46,6 +46,8 @@ DEFAULTS = {
     # Menu link that opens the full patient list, and an optional direct URL
     # for that list if the menu link can't be found.
     "patients_link_text": "Patients",
+    # Section of the patient file that holds the images.
+    "images_tab_text": "Images",
     "patients_url": "/patients/patients",
     # Safety limit on how many pages of the patient list to walk through.
     "max_list_pages": 200,
@@ -61,6 +63,8 @@ DEFAULTS = {
         "patients_link": None,
         "patient_link": None,
         "next_page": None,
+        "open_patient": None,
+        "images_tab": None,
         "download": None,
     },
 }
@@ -91,6 +95,14 @@ LOGIN_LINK_SELECTORS = [
     "button:has-text('Sign in')",
 ]
 ROW_SELECTOR = "tbody tr, mat-row, [role=row]"
+# The book icon in each patient row that opens the patient's file.
+BOOK_ICON_SELECTOR = ", ".join([
+    "mat-icon:text-matches('^\\s*(book|menu_book|import_contacts|auto_stories|library_books|book_2)\\s*$', 'i')",
+    "[fonticon*=book i]",
+    "[svgicon*=book i]",
+    "[data-icon*=book i]",
+    "[class*=book i]",
+])
 NEXT_PAGE_SELECTORS = [
     "a[rel=next]",
     "[aria-label*=next i]",
@@ -399,9 +411,37 @@ def click_next(page, config):
     return first_row_text(page) != before
 
 
+def name_columns(page):
+    """Positions of the columns that hold the patient's name, from the headings."""
+    headers = page.locator("thead th, mat-header-cell, [role=columnheader]")
+    texts = [" ".join(headers.nth(i).inner_text().split()).lower() for i in range(headers.count())]
+    return [i for i, t in enumerate(texts)
+            if "name" in t and not any(w in t for w in ("user", "clinic", "device", "entity", "practitioner"))]
+
+
+def row_patient_name(row, columns):
+    cells = row.locator("td, [role=cell], [role=gridcell], mat-cell")
+    texts = [" ".join(cells.nth(i).inner_text().split()) for i in range(cells.count())]
+    picked = [texts[i] for i in columns if i < len(texts) and texts[i]]
+    if not picked:
+        picked = [t for t in texts if t][:1]
+    return " ".join(picked) or "Unknown patient"
+
+
+def open_patient_control(row, config):
+    """What to click in a list row to open the patient's file: the book icon if there is one."""
+    icon = row.locator(config["selectors"]["open_patient"] or BOOK_ICON_SELECTOR).first
+    if icon.count():
+        clickable = icon.locator("xpath=ancestor-or-self::*[self::button or self::a or @role='button'][1]")
+        return clickable if clickable.count() else icon
+    first_cell = row.locator("td, [role=cell], [role=gridcell], mat-cell").first
+    return first_cell if first_cell.count() else row
+
+
 def patients_by_clicking_rows(page, config, page_number):
-    """{url: name} for list rows that open the patient when clicked (no links)."""
+    """{url: name} for list rows whose patient file opens on click (no links)."""
     patients = {}
+    columns = name_columns(page)
     page_start = first_row_text(page)
     count = len(data_rows(page))
     for i in range(count):
@@ -409,16 +449,17 @@ def patients_by_clicking_rows(page, config, page_number):
         if i >= len(rows):
             break
         row = rows[i]
-        first_cell = row.locator("td, [role=cell], [role=gridcell], mat-cell").first
-        name = " ".join((first_cell if first_cell.count() else row).inner_text().split())
+        name = row_patient_name(row, columns)
         before = page.url
-        (first_cell if first_cell.count() else row).click()
+        open_patient_control(row, config).click()
         try:
             page.wait_for_url(lambda url: url != before, timeout=10000)
         except PlaywrightTimeout:
+            if i >= 2 and not patients:
+                raise RuntimeError("Clicking the patients in the list doesn't open their file")
             continue  # this row doesn't open anything
         page.wait_for_load_state("networkidle")
-        patients.setdefault(page.url, name or "Unknown patient")
+        patients.setdefault(page.url, name)
         page.go_back()
         page.wait_for_load_state("networkidle")
         wait_for_rows(page, config)
@@ -462,11 +503,35 @@ def image_key(page, el, fallback):
     return fallback
 
 
+def open_images_tab(page, config):
+    """Click "Images" in the patient's file, if the file has such a section."""
+    sel = config["selectors"]
+    if sel["images_tab"]:
+        candidates = [page.locator(sel["images_tab"])]
+    else:
+        pattern = re.compile(rf"^\s*{re.escape(config['images_tab_text'])}\b", re.I)
+        candidates = [page.get_by_role(role, name=pattern) for role in ("tab", "link", "button", "menuitem")]
+        candidates.append(page.get_by_text(re.compile(rf"^\s*{re.escape(config['images_tab_text'])}\s*$", re.I)))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        for locator in candidates:
+            for i in range(locator.count()):
+                if locator.nth(i).is_visible():
+                    locator.nth(i).click()
+                    page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(1000)
+                    return True
+        page.wait_for_timeout(500)
+    log.warning("No '%s' section found in the patient file at %s", config["images_tab_text"], urlparse(page.url).path)
+    return False
+
+
 def iter_images(page, patients, config):
     """Yield (key, patient name, page, element) for every download on each patient's page."""
     download_sel = config["selectors"]["download"] or DOWNLOAD_SELECTOR
     for url, name in patients.items():
         app_navigate(page, url)
+        open_images_tab(page, config)
         buttons = page.locator(download_sel)
         # The app draws the page after loading its data, so give it a moment.
         deadline = time.monotonic() + 10
@@ -523,6 +588,112 @@ def download_element(page, el, folder, prefix, timeout_ms):
     path = unique_path(folder, f"{prefix} - {download.suggested_filename}")
     download.save_as(path)
     return path
+
+
+# --- inspect -----------------------------------------------------------------
+
+# Describes an element's structure with all patient text blanked out: tags,
+# classes and roles are kept; text becomes [text N] (N = length) except icon
+# names and column headings; numbers in addresses become N.
+DESCRIBE_JS = """
+(el) => {
+  const SAFE_WORDS = /^(view|open|edit|delete|remove|download|details?|more|actions?|menu|next|previous|page|images?|scans?|reports?|export|patients?|close|back|select)\\b/i;
+  const ICON = (n) => n.matches && n.matches("mat-icon, .material-icons, .material-symbols-outlined, i[class*=icon], i[class*=fa]");
+  function attrs(n) {
+    let out = "";
+    for (const a of n.attributes) {
+      if (a.name.startsWith("_ng") || a.name === "style") continue;
+      let v = a.value;
+      if (["aria-label", "title", "mattooltip", "ng-reflect-message", "alt", "placeholder"].includes(a.name)) {
+        v = SAFE_WORDS.test(v.trim()) ? v : "[redacted]";
+      } else if (a.name === "value") {
+        v = "[redacted]";
+      } else {
+        v = v.replace(/\\d+/g, "N").slice(0, 80);
+      }
+      out += ` ${a.name}="${v}"`;
+    }
+    const cs = getComputedStyle(n);
+    if (cs.cursor === "pointer") out += " [CLICKABLE]";
+    return out;
+  }
+  function walk(n, depth, keepText) {
+    const pad = "  ".repeat(depth);
+    if (n.nodeType === 3) {
+      const t = n.textContent.trim();
+      if (!t) return "";
+      return pad + (keepText ? t.slice(0, 40) : `[text ${t.length}]`) + "\\n";
+    }
+    if (n.nodeType !== 1) return "";
+    const tag = n.tagName.toLowerCase();
+    if (["script", "style", "path", "g"].includes(tag)) return "";
+    const keep = keepText || ICON(n) || n.matches("th, [role=columnheader], mat-header-cell") ||
+      (n.matches("button, [role=button]") && SAFE_WORDS.test(n.textContent.trim()));
+    let out = `${pad}<${tag}${attrs(n)}>\\n`;
+    if (depth > 12) return out + pad + "  ...\\n";
+    for (const c of n.childNodes) out += walk(c, depth + 1, keep);
+    return out;
+  }
+  return walk(el, 0, false);
+}
+"""
+
+
+def inspect(config, headed=True):
+    """Print a privacy-safe description of the patient list, for troubleshooting."""
+    username, password = get_login()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=not headed)
+        context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        context.set_default_timeout(int(config["timeout_seconds"] * 1000))
+        page = context.new_page()
+        try:
+            login(page, config, username, password)
+            open_patient_list(page, config)
+            wait_for_rows(page, config)
+            page.wait_for_timeout(2000)
+            print("\n===== COPY FROM HERE =====")
+            print("Address:", re.sub(r"\d+", "N", urlparse(page.url).path))
+            for selector in ["table", "tbody tr", "mat-row", "[role=row]", "a[href]", "button",
+                             "[role=dialog]", "mat-paginator", "[aria-label*=next i]"]:
+                print(f"count {selector}: {page.locator(selector).count()}")
+            header = page.locator("thead tr, mat-header-row, [role=row]:has([role=columnheader])").first
+            if header.count():
+                print("\n--- header row ---")
+                print(header.evaluate(DESCRIBE_JS))
+            rows = data_rows(page)
+            for i, row in enumerate(rows[:2]):
+                print(f"--- patient row {i + 1} (names blanked) ---")
+                print(row.evaluate(DESCRIBE_JS))
+            print("--- links on the page (outside the list) ---")
+            links = page.locator("a[href]")
+            for i in range(links.count()):
+                link = links.nth(i)
+                in_rows = link.evaluate("e => !!e.closest('tr, mat-row, [role=row]')")
+                text = " ".join(link.inner_text().split())
+                print(" ", "[in a row]" if in_rows else text[:30], "->",
+                      re.sub(r"\d+", "N", urlparse(urljoin(page.url, link.get_attribute("href"))).path))
+            if rows:
+                print("--- opening the first patient (book icon if found) ---")
+                before = page.url
+                open_patient_control(rows[0], config).click()
+                page.wait_for_timeout(4000)
+                print("address changed:", page.url != before,
+                      "->", re.sub(r"\d+", "N", urlparse(page.url).path))
+                for selector in ["[role=dialog]", "mat-dialog-container", ".modal", "mat-drawer",
+                                 ".cdk-overlay-pane", "[class*=drawer]", "[class*=panel]"]:
+                    count = page.locator(selector).count()
+                    if count:
+                        print(f"after click, count {selector}: {count}")
+                if page.url != before:
+                    print("--- patient file: Images section ---")
+                    print("found Images:", open_images_tab(page, config),
+                          "->", re.sub(r"\d+", "N", urlparse(page.url).path))
+                    main = page.locator("main, [role=main], mat-sidenav-content, .content").first
+                    print((main if main.count() else page.locator("body")).evaluate(DESCRIBE_JS)[:6000])
+            print("===== COPY TO HERE =====\n")
+        finally:
+            browser.close()
 
 
 # --- main --------------------------------------------------------------------
@@ -588,10 +759,16 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="list new patients without downloading")
     parser.add_argument("--mark-existing", action="store_true",
                         help="treat everything currently listed as already downloaded")
+    parser.add_argument("--inspect", action="store_true",
+                        help="describe the patient list page (no patient details) for troubleshooting")
     args = parser.parse_args()
 
     if args.set_login:
         set_login()
+        return
+    if args.inspect:
+        setup_logging()
+        inspect(load_config())
         return
 
     setup_logging()

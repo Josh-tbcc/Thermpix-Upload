@@ -34,16 +34,23 @@ async function render() {
   if (path === "/patients/patients") {
     const ids = Object.keys(data.patients);
     const chunk = ids.slice((listPage - 1) * PER_PAGE, listPage * PER_PAGE);
-    const rows = chunk.map(id => `<tr onclick="nav('/patients/patient/${id}')"><td>${data.patients[id]}</td><td>1980</td></tr>`).join("");
+    const rows = chunk.map(id => `<tr><td>${id}</td><td>${data.patients[id]}</td><td>1980</td>
+      <td><button onclick="nav('/patients/patient/${id}')"><mat-icon>menu_book</mat-icon></button>
+      <button onclick="alert('delete?')"><mat-icon>delete</mat-icon></button></td></tr>`).join("");
     const more = listPage * PER_PAGE < ids.length;
-    app.innerHTML = menu + `<table><thead><tr><th>Name</th><th>DOB</th></tr></thead><tbody>${rows}</tbody></table>
+    app.innerHTML = menu + `<table><thead><tr><th>ID</th><th>Patient Name</th><th>DOB</th><th></th></tr></thead><tbody>${rows}</tbody></table>
       <button aria-label="Next page" ${more ? "" : "disabled"} onclick="listPage++; render()">&gt;</button>`;
     return;
   }
   const m = path.match(/^\/patients\/patient\/(\w+)$/);
   if (m) {
     const links = (data.images[m[1]] || []).map(img => `<li>Scan ${img} <a href="/files/${img}.jpg">Download</a></li>`).join("");
-    app.innerHTML = menu + `<h1>${data.patients[m[1]]}</h1><ul>${links}</ul>`;
+    app.innerHTML = menu + `<main><h1>${data.patients[m[1]]}</h1>
+      <div role="tablist"><span role="tab">Overview</span> <span role="tab" id="images-tab">Images</span></div>
+      <div id="tab-body">Overview of the patient</div></main>`;
+    document.getElementById("images-tab").onclick = () => {
+      document.getElementById("tab-body").innerHTML = `<ul>${links}</ul>`;
+    };
   }
 }
 render();

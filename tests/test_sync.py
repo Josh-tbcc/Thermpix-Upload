@@ -237,3 +237,15 @@ def test_wrong_password(site, monkeypatch):
     site["config"]["timeout_seconds"] = 3
     with pytest.raises(RuntimeError, match="Thermpix says: Invalid username or password"):
         thermpix_sync.sync(site["config"])
+
+
+def test_inspect_hides_patient_names(site, capsys):
+    site["spa"] = True
+    site["config"]["patients_url"] = "/patients/patients"
+    thermpix_sync.inspect(site["config"], headed=False)
+    out = capsys.readouterr().out
+    assert "patient row 1" in out and "address changed: True" in out
+    assert "Patient Name" in out and "DOB" in out  # column headings are shown
+    assert "menu_book" in out and "found Images: True" in out
+    for name in ["Jane", "Citizen", "John", "Smith", "Mary", "Jones"]:
+        assert name not in out
