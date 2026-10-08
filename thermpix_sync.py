@@ -214,7 +214,9 @@ def first_visible(scope, selectors):
 
 def login(page, config, username, password):
     sel = config["selectors"]
-    page.goto(config["base_url"], wait_until="domcontentloaded")
+    # Let the web app finish loading (and redirecting to its login page) before
+    # typing, or the form can be redrawn and lose what was typed.
+    page.goto(config["base_url"], wait_until="networkidle")
 
     password_sel = sel["password"] or "input[type=password]"
     if not first_visible(page, [password_sel]):
@@ -238,12 +240,32 @@ def login(page, config, username, password):
     else:
         scope.locator(password_sel).first.press("Enter")
 
-    try:
-        page.locator(password_sel).first.wait_for(state="hidden")
-    except PlaywrightTimeout:
-        raise RuntimeError("Login didn't go through - check the saved username/password")
+    # Logged in once we've left the login page and no password box is showing.
+    deadline = time.monotonic() + config["timeout_seconds"]
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(500)
+        if "login" not in urlparse(page.url).path.lower() and not first_visible(page, [password_sel]):
+            break
+    else:
+        raise RuntimeError(f"Login didn't go through. {login_page_message(page)}")
     page.wait_for_load_state("networkidle")
-    log.info("Logged in")
+    log.info("Logged in (now at %s)", urlparse(page.url).path)
+
+
+def login_page_message(page):
+    """Any error or prompt the login page is showing, to explain a failed login."""
+    messages = page.locator(
+        "[role=alert], .error, .alert, .invalid-feedback, mat-error, .mat-mdc-form-field-error, "
+        ".toast, .snackbar, mat-snack-bar-container"
+    )
+    texts = [" ".join(messages.nth(i).inner_text().split()) for i in range(messages.count())
+             if messages.nth(i).is_visible()]
+    texts = [t for t in texts if t]
+    if texts:
+        return "Thermpix says: " + " / ".join(dict.fromkeys(texts))
+    if first_visible(page, ["input[autocomplete=one-time-code]", "input[name*=code i]", "input[name*=otp i]"]):
+        return "Thermpix is asking for a verification code."
+    return "Check the saved username/password (run Install.bat again to re-enter them)."
 
 
 def open_patient_list(page, config):
@@ -251,6 +273,8 @@ def open_patient_list(page, config):
     sel = config["selectors"]
     if config["patients_url"]:
         page.goto(urljoin(page.url, config["patients_url"]), wait_until="networkidle")
+        if "login" in urlparse(page.url).path.lower():
+            raise RuntimeError("Thermpix sent us back to the login page when opening the patient list")
         return
     pattern = re.compile(rf"^\s*(all\s+)?{re.escape(config['patients_link_text'])}\b", re.I)
     # The menu item might be a link, a button, a menu entry or just text with a

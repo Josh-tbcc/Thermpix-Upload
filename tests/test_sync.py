@@ -15,7 +15,7 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 LOGIN = """<html><body><a href="/login">Log in</a></body></html>"""
 LOGIN_FORM = """<html><body><form method="post" action="/login">
 <input type="text" name="username"><input type="password" name="password">
-<button type="submit">Sign in</button></form></body></html>"""
+<button type="submit">Sign in</button></form>{error}</body></html>"""
 
 
 MENU = """<nav><a href="/">Dashboard</a> <a href="/entities">Entities</a> <a href="/clinics">Clinics</a>
@@ -75,8 +75,9 @@ def make_handler(site):
         def do_GET(self):
             if self.path == "/":
                 return self.send(dashboard() if self.logged_in() else LOGIN)
-            if self.path == "/login":
-                return self.send(LOGIN_FORM)
+            if self.path.startswith("/login"):
+                error = '<div role="alert">Invalid username or password</div>' if "failed" in self.path else ""
+                return self.send(LOGIN_FORM.format(error=error))
             if not self.logged_in():
                 self.send_response(403)
                 return self.end_headers()
@@ -114,7 +115,7 @@ def make_handler(site):
                 self.send_header("Set-Cookie", "session=ok; Path=/")
                 self.send_header("Location", "/")
             else:
-                self.send_header("Location", "/login")
+                self.send_header("Location", "/login?failed=1")
             self.end_headers()
 
     return Handler
@@ -190,5 +191,5 @@ def test_mark_existing_skips_current_images(site):
 def test_wrong_password(site, monkeypatch):
     monkeypatch.setenv("THERMPIX_PASSWORD", "nope")
     site["config"]["timeout_seconds"] = 3
-    with pytest.raises(RuntimeError, match="Login didn't go through"):
+    with pytest.raises(RuntimeError, match="Thermpix says: Invalid username or password"):
         thermpix_sync.sync(site["config"])
