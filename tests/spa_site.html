@@ -9,7 +9,7 @@ const PER_PAGE = 2;
 const app = document.getElementById("app");
 const menu = `<nav><span onclick="nav('/dashboard')">Dashboard</span> <span>Entities</span>
   <span>Clinics</span> <span>Users</span>
-  <a href="/patients" onclick="event.preventDefault(); nav('/patients/patients')"><mat-icon>groups</mat-icon> Patients</a>
+  <a href="/patients" onclick="event.preventDefault()"><mat-icon>groups</mat-icon> Patients</a>
   <span>Devices</span></nav>`;
 
 function nav(path) { history.pushState({}, "", path); if (path === "/patients/patients") listPage = 1; render(); }
@@ -31,7 +31,13 @@ async function render() {
     return;
   }
   const data = await (await fetch("/api/data", { headers: { Authorization: token } })).json();
-  if (path === "/dashboard") { app.innerHTML = menu + "<h3>Recently Created Patients</h3>"; return; }
+  if (path === "/dashboard") {
+    const recent = Object.keys(data.patients).slice(0, 2).map(id => `<tr role="row"><td>${data.patients[id]}</td>
+      <td><button aria-label="Details" onclick="nav('/patients/patient/${id}')"><svg></svg></button></td></tr>`).join("");
+    app.innerHTML = menu + `<h3>Recently Created Patients</h3><table><thead><tr role="row">
+      <th role="columnheader">Patient</th><th role="columnheader"></th></tr></thead><tbody>${recent}</tbody></table>`;
+    return;
+  }
   if (path === "/patients/patients" && !window.listLoaded) {
     app.innerHTML = menu + `<table><tbody><tr><td>Loading...</td></tr></tbody></table>`;
     window.listLoaded = true;
@@ -53,15 +59,21 @@ async function render() {
   }
   const m = path.match(/^\/patients\/patient\/(\w+)$/);
   if (m) {
-    app.innerHTML = menu + `<main><h1>${data.patients[m[1]]}</h1>
+    app.innerHTML = menu + `<main><div class="ov-header__text"><p>${data.patients[m[1]]}</p></div>
       <div role="tablist"><span role="tab">Overview</span> <span role="tab" id="images-tab">Images</span></div>
       <div id="tab-body">Overview of the patient</div></main>`;
     const imgs = data.images[m[1]] || [];
     const drawImages = (selecting) => {
-      const cards = imgs.map(img => `<sc-card class="image-card">
-          ${selecting ? `<mat-checkbox><input type="checkbox" class="cdk-visually-hidden" value="${img}"
-            style="position:absolute;width:1px;height:1px;opacity:0"></mat-checkbox>` : ""}
-          <img src="/files/${img}.jpg" width="80" height="60"><span>08/10/2026</span></sc-card>`).join("");
+      // Like Thermpix: images grouped under a date heading (day/month/year).
+      const groups = {};
+      imgs.forEach(img => { const d = data.dates[img] || data.today; (groups[d] = groups[d] || []).push(img); });
+      const cards = Object.entries(groups).map(([d, list]) => `<div class="image-group">
+          <div class="image-group__header"><p>${d}</p></div><div class="image-group__pics-wrapper">` +
+        list.map(img => `<sc-image-card class="image-card">
+          ${selecting ? `<div class="form-check custom-checkbox archive"><input type="checkbox" value="${img}"
+            style="position:absolute;width:1px;height:1px;opacity:0"></div>` : ""}
+          <img src="/files/${img}.jpg?sig=${Math.random()}" width="80" height="60"></sc-image-card>`).join("") +
+        `</div></div>`).join("");
       // Like Thermpix: "Select image" swaps in a toolbar that includes a red Archive button.
       document.getElementById("tab-body").innerHTML = selecting ? `<div class="toolbar">
           <button><span class="material-symbols-outlined">keep</span><span>Pin images</span></button>

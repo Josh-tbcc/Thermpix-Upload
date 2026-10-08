@@ -2,9 +2,9 @@
 
 Every day at 7pm this logs into Thermpix (https://app.thermpix.com/), goes through
 every patient under **Patients**, and downloads any image that hasn't been
-downloaded before into a folder called **DPAs** on your Desktop. That covers new
+downloaded before into the clinic's shared folder `\\SERVER\Spinalogic\ImageCapture\DPAs`. That covers new
 patients and new images for returning patients. Each file is named after the
-patient, e.g. `Jane Citizen - 2026-10-07 - scan1.jpg`.
+patient and the date the image was taken, e.g. `Jane Citizen - 2026-10-07 - scan1.jpg`.
 
 - It uses its own hidden browser, so your Chrome and your download settings are untouched.
 - Your login is stored in Windows Credential Manager on your computer, not in this repo.
@@ -21,10 +21,10 @@ patient, e.g. `Jane Citizen - 2026-10-07 - scan1.jpg`.
    somewhere permanent, e.g. `Documents\Thermpix-Upload`. Don't run it from the
    Downloads folder or the zip itself, because the 7pm task runs from wherever you put it.
 3. **Double-click `Install.bat`.** It installs what's needed, asks for your Thermpix
-   username and password once, records the images already in Thermpix (so it only
-   downloads images taken from then on), and sets up the 7pm schedule.
+   username and password once, downloads the images from the last 10 days (older ones
+   are noted as done, not downloaded), and sets up the 7pm schedule.
 4. **Double-click `Run Now.bat`** to test it. A browser window opens so you can watch
-   it log in and check each patient. New images land in `Desktop\DPAs`.
+   it log in and check each patient. New images land in the DPAs folder.
 
 ## Day to day
 

@@ -27,7 +27,7 @@ import re
 import sys
 import time
 import zipfile
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -41,9 +41,10 @@ HERE = Path(__file__).resolve().parent
 
 DEFAULTS = {
     "base_url": "https://app.thermpix.com/",
-    # Folder name created on the Desktop. Set "output_dir" to a full path to override.
+    # Where the images are saved: the clinic's shared DPAs folder. Set to null
+    # to use a folder called "folder_name" on the Desktop instead.
     "folder_name": "DPAs",
-    "output_dir": None,
+    "output_dir": r"\\SERVER\Spinalogic\ImageCapture\DPAs",
     # Menu link that opens the full patient list, and an optional direct URL
     # for that list if the menu link can't be found.
     "patients_link_text": "Patients",
@@ -170,7 +171,10 @@ def load_config():
 
 def output_dir(config):
     path = Path(config["output_dir"]) if config["output_dir"] else desktop_dir() / config["folder_name"]
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"Can't open the folder {path} - is the server on and reachable? ({e})")
     return path
 
 
@@ -350,15 +354,22 @@ def find_menu_item(page, config, wait_seconds):
 
 def open_patient_list(page, config):
     """Go from the dashboard to the page listing all patients."""
+    start = page.url
     link = find_menu_item(page, config, wait_seconds=config["ui_wait_seconds"])
     if link:
         link.click()
         page.wait_for_load_state("networkidle")
-    elif config["patients_url"]:
-        log.info("No '%s' menu item found; opening %s directly", config["patients_link_text"], config["patients_url"])
+        try:
+            page.wait_for_url(lambda url: url != start, timeout=config["ui_wait_seconds"] * 1000)
+        except PlaywrightTimeout:
+            pass
+    if page.url == start:
+        # The click didn't leave the dashboard (whose "Recently Created Patients"
+        # table is not the full list), so go to the patient list directly.
+        if not config["patients_url"]:
+            raise RuntimeError(f"Couldn't open the '{config['patients_link_text']}' page")
+        log.info("Opening %s directly", config["patients_url"])
         app_navigate(page, config["patients_url"], config)
-    else:
-        raise RuntimeError(f"Couldn't find the '{config['patients_link_text']}' menu item")
     if on_login_page(page):
         raise RuntimeError("Thermpix sent us back to the login page when opening the patient list")
     log.info("Opened patient list: %s", urlparse(page.url).path)
@@ -451,7 +462,7 @@ def row_patient_name(row, columns):
     picked = [texts[i] for i in columns if i < len(texts) and texts[i]]
     if not picked:
         picked = [t for t in texts if t][:1]
-    return " ".join(picked) or "Unknown patient"
+    return " ".join(picked)
 
 
 def open_patient_control(row, config):
@@ -609,6 +620,68 @@ def save_download(download, folder, prefix):
     return saved
 
 
+# Day/month order of numeric dates like 03/10/2026, learned from dates where
+# one part is over 12 (e.g. 25/09/2026 can only be day-first).
+DATE_ORDER = {"order": None}
+MONTH_FORMATS = ["%b %d %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y"]
+
+
+def learn_date_order(texts):
+    for text in texts:
+        for a, b, _ in re.findall(r"\b(\d{1,2})[/.](\d{1,2})[/.](\d{4})\b", text):
+            if int(a) > 12:
+                DATE_ORDER["order"] = "dmy"
+            elif int(b) > 12:
+                DATE_ORDER["order"] = "mdy"
+
+
+def possible_dates(text):
+    """Every date the text could mean (two when day/month order is unknown)."""
+    text = " ".join(text.split())
+    if re.search(r"\btoday\b", text, re.I):
+        return [date.today()]
+    if re.search(r"\byesterday\b", text, re.I):
+        return [date.today() - timedelta(days=1)]
+    m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text)
+    if m:
+        try:
+            return [date(int(m[1]), int(m[2]), int(m[3]))]
+        except ValueError:
+            return []
+    m = re.search(r"\b(\d{1,2})[/.](\d{1,2})[/.](\d{4})\b", text)
+    if m:
+        a, b, y = int(m[1]), int(m[2]), int(m[3])
+        orders = [DATE_ORDER["order"]] if DATE_ORDER["order"] else ["dmy", "mdy"]
+        found = []
+        for order in orders:
+            d, mo = (a, b) if order == "dmy" else (b, a)
+            try:
+                found.append(date(y, mo, d))
+            except ValueError:
+                pass
+        return list(dict.fromkeys(found))
+    # "Oct 3, 2026", "3 October 2026", "Sat, Oct 3, 2026"...
+    for m in re.finditer(r"(\d{1,2} [A-Za-z]{3,9}|[A-Za-z]{3,9} \d{1,2}),? (\d{4})", text):
+        candidate = f"{m[1]} {m[2]}"
+        for fmt in MONTH_FORMATS:
+            try:
+                return [datetime.strptime(candidate, fmt).date()]
+            except ValueError:
+                continue
+    return []
+
+
+def image_dates(card):
+    """Possible dates an image was taken, from its date heading (or its own card)."""
+    group = card.locator("xpath=ancestor-or-self::*[contains(concat(' ', normalize-space(@class), ' '), ' image-group ')][1]")
+    header = group.locator(".image-group__header").first if group.count() else None
+    for text in ([header.inner_text()] if header is not None and header.count() else []) + [card.inner_text()]:
+        dates = possible_dates(text)
+        if dates:
+            return dates
+    return []
+
+
 def iter_selectable_images(page, url, name, config, timeout_ms):
     """Images that are downloaded via "Select image", ticking the image, then "Download".
 
@@ -626,6 +699,8 @@ def iter_selectable_images(page, url, name, config, timeout_ms):
     if not boxes:
         log.info("No images for %s", name)
         return
+    headers = page.locator(".image-group__header")
+    learn_date_order([headers.nth(i).inner_text() for i in range(headers.count())])
     seen = {}
     for box in boxes:
         # The image's card: the largest area around the checkbox holding no other checkbox.
@@ -652,7 +727,7 @@ def iter_selectable_images(page, url, name, config, timeout_ms):
             box.uncheck(force=True)
             return files
 
-        yield key, download
+        yield key, download, image_dates(card)
 
 
 def iter_download_buttons(page, url, name, config, timeout_ms):
@@ -675,21 +750,33 @@ def iter_download_buttons(page, url, name, config, timeout_ms):
         def download(prefix, el=el):
             return [download_element(page, el, output_dir(config), prefix, timeout_ms)]
 
-        yield image_key(page, el, f"{url}#{label}#{seen[label]}"), download
+        yield image_key(page, el, f"{url}#{label}#{seen[label]}"), download, possible_dates(label)
+
+
+def name_in_patient_file(page):
+    """The patient's name shown under their photo at the top of their file."""
+    header = page.locator(".ov-header__text p, .ov-header__text h1, .ov-header__text h2").first
+    try:
+        header.wait_for(timeout=5000)
+    except PlaywrightTimeout:
+        return ""
+    return " ".join(header.inner_text().split())
 
 
 def iter_images(page, patients, config, timeout_ms):
-    """Yield (key, patient name, download) for every image of every patient."""
+    """Yield (key, patient name, download, possible dates) for every image of every patient."""
     for url, name in patients.items():
         app_navigate(page, url, config)
+        if not name or name == "Unknown patient":
+            name = name_in_patient_file(page) or "Unknown patient"
         open_images_tab(page, config)
         found = False
-        for key, download in iter_selectable_images(page, url, name, config, timeout_ms):
+        for key, download, dates in iter_selectable_images(page, url, name, config, timeout_ms):
             found = True
-            yield key, name, download
+            yield key, name, download, dates
         if not found:
-            for key, download in iter_download_buttons(page, url, name, config, timeout_ms):
-                yield key, name, download
+            for key, download, dates in iter_download_buttons(page, url, name, config, timeout_ms):
+                yield key, name, download, dates
 
 
 def unique_path(folder, name):
@@ -887,8 +974,8 @@ def try_one(config, headed=True):
             wait_for_rows(page, config)
             patients = patient_links_on_page(page, config) or patients_by_clicking_rows(page, config, 1, limit=5)
             today = datetime.now().strftime("%Y-%m-%d")
-            for key, name, download in iter_images(page, patients, config, timeout_ms):
-                files = download(f"{name} - {today}")
+            for key, name, download, dates in iter_images(page, patients, config, timeout_ms):
+                files = download(f"{name} - {dates[0].isoformat() if dates else today}")
                 for f in files:
                     log.info("Test download saved: %s", f)
                 print(f"\nIt worked: {len(files)} file(s) saved in {output_dir(config)}")
@@ -908,7 +995,13 @@ def try_one(config, headed=True):
 
 # --- main --------------------------------------------------------------------
 
-def sync(config, headed=False, dry_run=False, mark_existing=False):
+def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days=None):
+    """Download every image not downloaded before.
+
+    mark_existing: record everything as done without downloading.
+    catch_up_days: download images dated within the last N days, and record
+    older ones (and undated ones) as done without downloading them.
+    """
     folder = output_dir(config)
     state = load_state()
     username, password = get_login()
@@ -925,17 +1018,21 @@ def sync(config, headed=False, dry_run=False, mark_existing=False):
             log.info("Checking %d patients for new images", len(patients))
             today = datetime.now().strftime("%Y-%m-%d")
 
+            cutoff = date.today() - timedelta(days=catch_up_days) if catch_up_days is not None else None
             listed = saved = 0
-            for key, name, download in iter_images(page, patients, config, timeout_ms):
+            for key, name, download, dates in iter_images(page, patients, config, timeout_ms):
                 listed += 1
                 if key in state["downloaded"]:
                     continue
+                recent = [d for d in dates if cutoff is None or d >= cutoff]
+                skip = mark_existing or (cutoff is not None and not recent)
                 if dry_run:
-                    log.info("Would download an image for %s", name)
+                    log.info("%s an image for %s", "Would skip" if skip else "Would download", name)
                     continue
                 files = []
-                if not mark_existing:
-                    files = download(f"{name} - {today}")
+                if not skip:
+                    taken = (recent or dates or [None])[0]
+                    files = download(f"{name} - {taken.isoformat() if taken else today}")
                     for f in files:
                         log.info("Saved %s", f)
                     saved += len(files)
@@ -949,6 +1046,9 @@ def sync(config, headed=False, dry_run=False, mark_existing=False):
             log.info("%d images listed", listed)
             if mark_existing:
                 log.info("Marked all current images as already downloaded")
+            elif catch_up_days is not None:
+                log.info("Caught up: %d images from the last %d days saved in %s; older ones marked as done",
+                         saved, catch_up_days, folder)
             elif not dry_run:
                 log.info("Done: %d new images saved in %s", saved, folder)
         except Exception:
@@ -970,6 +1070,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="list new patients without downloading")
     parser.add_argument("--mark-existing", action="store_true",
                         help="treat everything currently listed as already downloaded")
+    parser.add_argument("--catch-up-days", type=int, metavar="N",
+                        help="download images from the last N days; mark older ones as done")
     parser.add_argument("--try-one", action="store_true",
                         help="download a single image as a test (not recorded as downloaded)")
     parser.add_argument("--inspect", action="store_true",
@@ -994,7 +1096,8 @@ def main():
 
     setup_logging()
     try:
-        sync(load_config(), headed=args.headed, dry_run=args.dry_run, mark_existing=args.mark_existing)
+        sync(load_config(), headed=args.headed, dry_run=args.dry_run, mark_existing=args.mark_existing,
+             catch_up_days=args.catch_up_days)
     except SystemExit:
         raise
     except Exception:

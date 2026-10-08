@@ -3,7 +3,7 @@
 import http.server
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -119,7 +119,9 @@ def make_handler(site):
                 if self.headers.get("Authorization") != "tok":
                     self.send_response(401)
                     return self.end_headers()
-                return self.send(json.dumps({"patients": site["patients"], "images": site["images"]}),
+                return self.send(json.dumps({"patients": site["patients"], "images": site["images"],
+                                             "dates": site.get("dates", {}),
+                                             "today": datetime.now().strftime("%d/%m/%Y")}),
                                  "application/json")
             return self.send(SPA_HTML)
 
@@ -193,7 +195,9 @@ def test_clickable_rows_without_links(site):
 def test_web_app_that_logs_out_on_page_load(site, caplog):
     """Like the real Thermpix: typing an address logs you out, so it must click through."""
     site["spa"] = True
-    site["config"]["patients_url"] = None  # must find the "groups Patients" menu link
+    # The menu link doesn't open the list (like the real run), so it must notice it's
+    # still on the dashboard and open the full list directly.
+    site["config"]["patients_url"] = "/patients/patients"
     thermpix_sync.sync(site["config"])
     assert files(site["out"]) == [
         f"Jane Citizen - {TODAY} - a1.jpg",
@@ -206,8 +210,44 @@ def test_web_app_that_logs_out_on_page_load(site, caplog):
     assert not site.get("archived"), "the Archive button must never be pressed"
 
 
+def test_catch_up_last_10_days(site):
+    site["spa"] = True
+    site["config"]["patients_url"] = "/patients/patients"
+    thermpix_sync.DATE_ORDER["order"] = None
+
+    def ago(days, fmt="%d/%m/%Y"):
+        return (datetime.now() - timedelta(days=days)).strftime(fmt)
+
+    site["images"] = {"101": ["a1"], "102": ["b1", "b2"], "103": ["c1"]}
+    site["dates"] = {"a1": ago(0), "b1": ago(30), "b2": ago(40), "c1": ago(5)}
+    thermpix_sync.sync(site["config"], catch_up_days=10)
+    assert files(site["out"]) == [
+        f"Jane Citizen - {ago(0, '%Y-%m-%d')} - a1.jpg",
+        f"Mary Jones - {ago(5, '%Y-%m-%d')} - c1.jpg",
+    ]
+    # The older images were recorded, so the daily run only fetches new ones.
+    site["images"]["102"].append("b3")
+    thermpix_sync.sync(site["config"])
+    assert f"John Smith - {ago(0, '%Y-%m-%d')} - b3.jpg" in files(site["out"])
+    assert len(files(site["out"])) == 3
+    assert not site.get("archived")
+
+
+def test_dates():
+    thermpix_sync.DATE_ORDER["order"] = None
+    from datetime import date
+    assert thermpix_sync.possible_dates("2026-10-03") == [date(2026, 10, 3)]
+    assert thermpix_sync.possible_dates("Oct 3, 2026") == [date(2026, 10, 3)]
+    assert thermpix_sync.possible_dates("3 October 2026") == [date(2026, 10, 3)]
+    assert thermpix_sync.possible_dates("03/10/2026") == [date(2026, 10, 3), date(2026, 3, 10)]
+    thermpix_sync.learn_date_order(["25/09/2026"])
+    assert thermpix_sync.possible_dates("03/10/2026") == [date(2026, 10, 3)]
+    thermpix_sync.DATE_ORDER["order"] = None
+
+
 def test_try_one_downloads_a_single_image(site):
     site["spa"] = True
+    site["config"]["patients_url"] = "/patients/patients"
     thermpix_sync.try_one(site["config"], headed=False)
     assert files(site["out"]) == [f"Jane Citizen - {TODAY} - a1.jpg"]
     assert not site.get("archived")

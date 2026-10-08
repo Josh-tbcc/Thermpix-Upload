@@ -32,14 +32,15 @@ Write-Host "`n== Your Thermpix login ==" -ForegroundColor Cyan
 Write-Host "Saved in Windows Credential Manager on this computer only."
 & $venvPython (Join-Path $here "thermpix_sync.py") --set-login
 
-Write-Host "`n== Recording the images already in Thermpix ==" -ForegroundColor Cyan
+Write-Host "`n== Downloading the last 10 days of images ==" -ForegroundColor Cyan
 $state = Join-Path $env:LOCALAPPDATA "ThermpixSync\state.json"
 if (Test-Path $state) {
     Write-Host "Already done on an earlier install - skipping."
 } else {
-    Write-Host "Checking every patient so only images taken from now on get downloaded."
-    Write-Host "This can take several minutes. Nothing is downloaded in this step."
-    & $venvPython (Join-Path $here "thermpix_sync.py") --mark-existing
+    Write-Host "Going through every patient: images from the last 10 days are saved to"
+    Write-Host "\\SERVER\Spinalogic\ImageCapture\DPAs, older ones are just noted as done."
+    Write-Host "This can take a while. Leave this window open."
+    & $venvPython (Join-Path $here "thermpix_sync.py") --catch-up-days 10
     if ($LASTEXITCODE -ne 0) {
         Write-Host "`nThat didn't work - the message above says why. Nothing has been scheduled yet." -ForegroundColor Red
         exit 1
