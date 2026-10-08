@@ -95,8 +95,11 @@ LOGIN_LINK_SELECTORS = [
     "button:has-text('Sign in')",
 ]
 ROW_SELECTOR = "tbody tr, mat-row, [role=row]"
-# The book icon in each patient row that opens the patient's file.
+# The book icon in each patient row that opens the patient's file. In
+# Thermpix it's a button labelled "Details" (next to "Edit", never clicked).
 BOOK_ICON_SELECTOR = ", ".join([
+    "button[aria-label='Details' i]",
+    "[mattooltip='Details' i]",
     "mat-icon:text-matches('^\\s*(book|menu_book|import_contacts|auto_stories|library_books|book_2)\\s*$', 'i')",
     "[fonticon*=book i]",
     "[svgicon*=book i]",
@@ -706,12 +709,16 @@ def inspect(config, headed=True):
                     count = page.locator(selector).count()
                     if count:
                         print(f"after click, count {selector}: {count}")
-                if page.url != before:
-                    print("--- patient file: Images section ---")
-                    print("found Images:", open_images_tab(page, config),
-                          "->", re.sub(r"\d+", "N", urlparse(page.url).path))
-                    main = page.locator("main, [role=main], mat-sidenav-content, .content").first
-                    print((main if main.count() else page.locator("body")).evaluate(DESCRIBE_JS)[:6000])
+                print("--- patient file: Images section ---")
+                print("found Images:", open_images_tab(page, config),
+                      "->", re.sub(r"\d+", "N", urlparse(page.url).path))
+                # Describe a pop-up if one opened, otherwise the main page area.
+                area = page.locator("mat-dialog-container, [role=dialog], mat-drawer.mat-drawer-opened").first
+                if not area.count():
+                    area = page.locator("main, [role=main], mat-sidenav-content, .content").first
+                if not area.count():
+                    area = page.locator("body")
+                print(area.evaluate(DESCRIBE_JS)[:8000])
             print("===== COPY TO HERE =====\n")
         finally:
             browser.close()

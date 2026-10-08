@@ -43,8 +43,8 @@ async function render() {
     const chunk = ids.slice((listPage - 1) * PER_PAGE, listPage * PER_PAGE);
     const rows = chunk.map(id => `<tr mat-row role="row"><td>${id}</td><td>${data.patients[id].split(" ")[1]}</td>
       <td>${data.patients[id].split(" ")[0]}</td><td>1980</td>
-      <td><button onclick="nav('/patients/patient/${id}')"><mat-icon>menu_book</mat-icon></button>
-      <button onclick="alert('delete?')"><mat-icon>delete</mat-icon></button></td></tr>`).join("");
+      <td><button aria-label="Details" onclick="nav('/patients/patient/${id}')"><mat-icon><svg width="24" height="24"></svg></mat-icon></button>
+      <button aria-label="Edit" onclick="alert('edit?')"><mat-icon><svg width="24" height="24"></svg></mat-icon></button></td></tr>`).join("");
     const more = listPage * PER_PAGE < ids.length;
     app.innerHTML = menu + `<table><thead><tr role="row"><th role="columnheader">Patient number</th><th role="columnheader">Last name</th>
       <th role="columnheader">First name</th><th role="columnheader">Birthday</th><th role="columnheader"></th></tr></thead><tbody>${rows}</tbody></table>
