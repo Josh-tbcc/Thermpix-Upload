@@ -62,11 +62,17 @@ async function render() {
           ${selecting ? `<mat-checkbox><input type="checkbox" class="cdk-visually-hidden" value="${img}"
             style="position:absolute;width:1px;height:1px;opacity:0"></mat-checkbox>` : ""}
           <img src="/files/${img}.jpg" width="80" height="60"><span>08/10/2026</span></sc-card>`).join("");
-      document.getElementById("tab-body").innerHTML = `<div class="toolbar">
-          <button id="select"><mat-icon>check_box</mat-icon> Select image</button>
-          <button id="download" ${selecting ? "" : "disabled"}><mat-icon>download</mat-icon> Download</button>
+      // Like Thermpix: "Select image" swaps in a toolbar that includes a red Archive button.
+      document.getElementById("tab-body").innerHTML = selecting ? `<div class="toolbar">
+          <button><span class="material-symbols-outlined">keep</span><span>Pin images</span></button>
+          <button id="download" mattooltip="Download images"><mat-icon>download_outlined</mat-icon><span>Download images</span></button>
+          <button id="archive" class="bg-red-500"><span class="material-symbols-outlined">archive</span><span>Archive</span></button>
+          <button><span class="material-symbols-outlined">cancel</span><span>Cancel</span></button>
+        </div><div class="images">${cards}</div>` : `<div class="toolbar">
+          <button id="select"><span class="material-symbols-outlined">check_box</span><span>Select image</span></button>
         </div><div class="images">${cards}</div>`;
-      document.getElementById("select").onclick = () => drawImages(true);
+      if (!selecting) { document.getElementById("select").onclick = () => drawImages(true); return; }
+      document.getElementById("archive").onclick = () => fetch("/api/archive", { method: "POST" });
       document.getElementById("download").onclick = () => {
         const ticked = [...document.querySelectorAll(".images input:checked")].map(b => b.value);
         if (ticked.length !== 1) { alert("tick exactly one image"); return; }

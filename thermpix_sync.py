@@ -51,7 +51,7 @@ DEFAULTS = {
     # there: "Select image" turns on the checkboxes, "Download" fetches the ticked ones.
     "images_tab_text": "Images",
     "select_text": "select( images?)?",
-    "download_text": "download",
+    "download_text": "download( images?)?",
     "patients_url": "/patients/patients",
     # Safety limit on how many pages of the patient list to walk through.
     "max_list_pages": 200,
@@ -335,6 +335,7 @@ def find_menu_item(page, config, wait_seconds):
         page.get_by_role("button", name=name),
         page.get_by_role("tab", name=name),
         page.get_by_text(re.compile(rf"^\s*{word}\s*$", re.I)),
+        page.locator(f"a[href$='/{config['patients_link_text'].lower()}']"),
     ]
     deadline = time.monotonic() + wait_seconds
     while True:
@@ -463,12 +464,12 @@ def open_patient_control(row, config):
     return first_cell if first_cell.count() else row
 
 
-def patients_by_clicking_rows(page, config, page_number):
+def patients_by_clicking_rows(page, config, page_number, limit=None):
     """{url: name} for list rows whose patient file opens on click (no links)."""
     patients = {}
     columns = name_columns(page)
     page_start = first_row_text(page)
-    count = len(data_rows(page))
+    count = min(len(data_rows(page)), limit or 10**9)
     log.info("%d rows in the list; opening each with %s", count,
              "the book icon" if data_rows(page) and data_rows(page)[0].locator(
                  config["selectors"]["open_patient"] or BOOK_ICON_SELECTOR).count() else "a click on the row")
@@ -868,6 +869,43 @@ def inspect(config, headed=True):
             browser.close()
 
 
+def try_one(config, headed=True):
+    """Download one image from the first patients in the list, as a test.
+
+    It isn't recorded as downloaded, so the real runs still treat it normally.
+    """
+    username, password = get_login()
+    timeout_ms = int(config["timeout_seconds"] * 1000)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=not headed)
+        context = browser.new_context(accept_downloads=True, viewport={"width": 1600, "height": 1000})
+        context.set_default_timeout(timeout_ms)
+        page = context.new_page()
+        try:
+            login(page, config, username, password)
+            open_patient_list(page, config)
+            wait_for_rows(page, config)
+            patients = patient_links_on_page(page, config) or patients_by_clicking_rows(page, config, 1, limit=5)
+            today = datetime.now().strftime("%Y-%m-%d")
+            for key, name, download in iter_images(page, patients, config, timeout_ms):
+                files = download(f"{name} - {today}")
+                for f in files:
+                    log.info("Test download saved: %s", f)
+                print(f"\nIt worked: {len(files)} file(s) saved in {output_dir(config)}")
+                return
+            print("\nNone of the first 5 patients had images to try.")
+        except Exception:
+            shot = data_dir() / f"error-{datetime.now():%Y%m%d-%H%M%S}.png"
+            try:
+                page.screenshot(path=str(shot), full_page=True)
+                log.error("Screenshot of the page at the time of the error: %s", shot)
+            except Exception:
+                pass
+            raise
+        finally:
+            browser.close()
+
+
 # --- main --------------------------------------------------------------------
 
 def sync(config, headed=False, dry_run=False, mark_existing=False):
@@ -932,6 +970,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="list new patients without downloading")
     parser.add_argument("--mark-existing", action="store_true",
                         help="treat everything currently listed as already downloaded")
+    parser.add_argument("--try-one", action="store_true",
+                        help="download a single image as a test (not recorded as downloaded)")
     parser.add_argument("--inspect", action="store_true",
                         help="describe the patient list page (no patient details) for troubleshooting")
     args = parser.parse_args()
@@ -942,6 +982,14 @@ def main():
     if args.inspect:
         setup_logging()
         inspect(load_config())
+        return
+    if args.try_one:
+        setup_logging()
+        try:
+            try_one(load_config())
+        except Exception:
+            log.exception("Test download failed")
+            sys.exit(1)
         return
 
     setup_logging()

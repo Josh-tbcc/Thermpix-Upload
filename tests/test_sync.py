@@ -127,6 +127,9 @@ def make_handler(site):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode()
             if site.get("spa"):
+                if self.path == "/api/archive":
+                    site["archived"] = True
+                    return self.send("{}", "application/json")
                 if "username=josh" in body and "password=secret" in body:
                     return self.send('{"token": "tok"}', "application/json")
                 self.send_response(401)
@@ -200,6 +203,14 @@ def test_web_app_that_logs_out_on_page_load(site, caplog):
     site["images"]["103"].append("c2")
     thermpix_sync.sync(site["config"])
     assert len(files(site["out"])) == 4
+    assert not site.get("archived"), "the Archive button must never be pressed"
+
+
+def test_try_one_downloads_a_single_image(site):
+    site["spa"] = True
+    thermpix_sync.try_one(site["config"], headed=False)
+    assert files(site["out"]) == [f"Jane Citizen - {TODAY} - a1.jpg"]
+    assert not site.get("archived")
 
 
 def test_web_app_wrong_password(site, monkeypatch):
@@ -248,6 +259,6 @@ def test_inspect_hides_patient_names(site, capsys):
     assert "patient row 1" in out and "address changed: True" in out
     assert "Last name" in out and "Birthday" in out  # column headings are shown
     assert 'aria-label="Details"' in out and "found Images: True" in out
-    assert "found Select image: True" in out and "checkboxes after Select image: 1" in out
+    assert "found Select image: True" in out and "checkboxes after Select image: 1 | Download button: True" in out
     for name in ["Jane", "Citizen", "John", "Smith", "Mary", "Jones"]:
         assert name not in out
