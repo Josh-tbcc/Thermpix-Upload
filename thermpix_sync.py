@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -250,14 +251,29 @@ def open_patient_list(page, config):
     if config["patients_url"]:
         page.goto(urljoin(page.url, config["patients_url"]), wait_until="networkidle")
         return
-    if sel["patients_link"]:
-        link = page.locator(sel["patients_link"]).first
-    else:
-        pattern = re.compile(rf"^\s*(all\s+)?{re.escape(config['patients_link_text'])}\s*$", re.I)
-        link = page.get_by_role("link", name=pattern).first
-    try:
-        link.wait_for(state="visible")
-    except PlaywrightTimeout:
+    pattern = re.compile(rf"^\s*(all\s+)?{re.escape(config['patients_link_text'])}\b", re.I)
+    # The menu item might be a link, a button, a menu entry or just text with a
+    # click handler, so try each kind until one shows up.
+    candidates = [page.locator(sel["patients_link"])] if sel["patients_link"] else [
+        page.get_by_role("link", name=pattern),
+        page.get_by_role("menuitem", name=pattern),
+        page.get_by_role("button", name=pattern),
+        page.get_by_role("tab", name=pattern),
+        page.get_by_text(pattern),
+    ]
+    link = None
+    deadline = time.monotonic() + config["timeout_seconds"]
+    while link is None and time.monotonic() < deadline:
+        for locator in candidates:
+            for i in range(locator.count()):
+                if locator.nth(i).is_visible():
+                    link = locator.nth(i)
+                    break
+            if link:
+                break
+        else:
+            page.wait_for_timeout(500)
+    if link is None:
         raise RuntimeError(
             f"Couldn't find the '{config['patients_link_text']}' menu link. "
             "Set patients_url in config.json to the address of the patient list."
@@ -399,7 +415,7 @@ def sync(config, headed=False, dry_run=False, mark_existing=False):
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=config["headless"] and not headed)
-        context = browser.new_context(accept_downloads=True)
+        context = browser.new_context(accept_downloads=True, viewport={"width": 1600, "height": 1000})
         context.set_default_timeout(timeout_ms)
         page = context.new_page()
         try:

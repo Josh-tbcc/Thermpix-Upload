@@ -19,7 +19,8 @@ LOGIN_FORM = """<html><body><form method="post" action="/login">
 
 
 MENU = """<nav><a href="/">Dashboard</a> <a href="/entities">Entities</a> <a href="/clinics">Clinics</a>
-<a href="/users">Users</a> <a href="/patients">Patients</a> <a href="/devices">Devices</a></nav>"""
+<a href="/users">Users</a> <span onclick="location='/patients'">Patients</span>
+<a href="/devices">Devices</a></nav>"""
 PER_PAGE = 2
 
 
