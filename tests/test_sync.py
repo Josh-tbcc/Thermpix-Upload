@@ -186,10 +186,10 @@ def test_clickable_rows_without_links(site):
     assert f"Mary Jones - {TODAY} - c1.jpg" in files(site["out"])
 
 
-def test_web_app_that_logs_out_on_page_load(site):
+def test_web_app_that_logs_out_on_page_load(site, caplog):
     """Like the real Thermpix: typing an address logs you out, so it must click through."""
     site["spa"] = True
-    site["config"]["patients_url"] = "/patients/patients"
+    site["config"]["patients_url"] = None  # must find the "groups Patients" menu link
     thermpix_sync.sync(site["config"])
     assert files(site["out"]) == [
         f"Jane Citizen - {TODAY} - a1.jpg",
@@ -245,7 +245,7 @@ def test_inspect_hides_patient_names(site, capsys):
     thermpix_sync.inspect(site["config"], headed=False)
     out = capsys.readouterr().out
     assert "patient row 1" in out and "address changed: True" in out
-    assert "Patient Name" in out and "DOB" in out  # column headings are shown
+    assert "Last name" in out and "Birthday" in out  # column headings are shown
     assert "menu_book" in out and "found Images: True" in out
     for name in ["Jane", "Citizen", "John", "Smith", "Mary", "Jones"]:
         assert name not in out

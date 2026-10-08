@@ -315,15 +315,17 @@ def app_navigate(page, url):
 def find_menu_item(page, config, wait_seconds):
     """The visible "Patients" menu item, or None."""
     sel = config["selectors"]
-    pattern = re.compile(rf"^\s*(all\s+)?{re.escape(config['patients_link_text'])}\b", re.I)
+    word = re.escape(config["patients_link_text"])
+    # Menu names can start with an icon's name, e.g. "groups Patients".
+    name = re.compile(rf"^\s*(\w+\s+)?(all\s+)?{word}\s*$", re.I)
     # The menu item might be a link, a button, a menu entry or just text with a
     # click handler, so try each kind until one shows up.
     candidates = [page.locator(sel["patients_link"])] if sel["patients_link"] else [
-        page.get_by_role("link", name=pattern),
-        page.get_by_role("menuitem", name=pattern),
-        page.get_by_role("button", name=pattern),
-        page.get_by_role("tab", name=pattern),
-        page.get_by_text(pattern),
+        page.get_by_role("link", name=name),
+        page.get_by_role("menuitem", name=name),
+        page.get_by_role("button", name=name),
+        page.get_by_role("tab", name=name),
+        page.get_by_text(re.compile(rf"^\s*{word}\s*$", re.I)),
     ]
     deadline = time.monotonic() + wait_seconds
     while True:
@@ -427,8 +429,10 @@ def name_columns(page):
     """Positions of the columns that hold the patient's name, from the headings."""
     headers = page.locator("thead th, mat-header-cell, [role=columnheader]")
     texts = [" ".join(headers.nth(i).inner_text().split()).lower() for i in range(headers.count())]
-    return [i for i, t in enumerate(texts)
-            if "name" in t and not any(w in t for w in ("user", "clinic", "device", "entity", "practitioner"))]
+    columns = [i for i, t in enumerate(texts)
+               if "name" in t and not any(w in t for w in ("user", "clinic", "device", "entity", "practitioner"))]
+    # "First name" before "Last name", whatever order the table shows them in.
+    return sorted(columns, key=lambda i: 0 if any(w in texts[i] for w in ("first", "given")) else 1)
 
 
 def row_patient_name(row, columns):
@@ -678,6 +682,7 @@ def inspect(config, headed=True):
                 print("\n--- header row ---")
                 print(header.evaluate(DESCRIBE_JS))
             rows = data_rows(page)
+            print("patient rows found:", len(rows), "| name columns:", name_columns(page))
             for i, row in enumerate(rows[:2]):
                 print(f"--- patient row {i + 1} (names blanked) ---")
                 print(row.evaluate(DESCRIBE_JS))
