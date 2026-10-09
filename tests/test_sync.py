@@ -233,11 +233,28 @@ def test_catch_up_last_10_days(site):
     assert not site.get("archived")
 
 
+def test_catch_up_after_images_were_only_marked(site):
+    """If an earlier run only recorded images as done, a catch-up still saves the recent ones."""
+    site["spa"] = True
+    site["config"]["patients_url"] = "/patients/patients"
+    thermpix_sync.DATE_ORDER["order"] = None
+    old = (datetime.now() - timedelta(days=30)).strftime("%Y/%m/%d")
+    site["dates"] = {"b1": old}
+    thermpix_sync.sync(site["config"], mark_existing=True)
+    assert files(site["out"]) == []
+    thermpix_sync.sync(site["config"], catch_up_days=10)
+    assert files(site["out"]) == [f"Jane Citizen - {TODAY} - a1.jpg", f"Mary Jones - {TODAY} - c1.jpg"]
+    thermpix_sync.sync(site["config"], catch_up_days=10)  # running it again changes nothing
+    assert len(files(site["out"])) == 2
+
+
 def test_dates():
     thermpix_sync.DATE_ORDER["order"] = None
     from datetime import date
     assert thermpix_sync.possible_dates("2026-10-03") == [date(2026, 10, 3)]
     assert thermpix_sync.possible_dates("Oct 3, 2026") == [date(2026, 10, 3)]
+    assert thermpix_sync.possible_dates("2026/10/03") == [date(2026, 10, 3)]
+    assert thermpix_sync.possible_dates("25-09-2026") == [date(2026, 9, 25)]
     assert thermpix_sync.possible_dates("3 October 2026") == [date(2026, 10, 3)]
     assert thermpix_sync.possible_dates("03/10/2026") == [date(2026, 10, 3), date(2026, 3, 10)]
     thermpix_sync.learn_date_order(["25/09/2026"])

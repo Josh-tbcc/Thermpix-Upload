@@ -321,6 +321,8 @@ def send_report(config, report):
         f"Patients checked: {report['patients']}",
         f"Images looked at: {report['listed']}",
         f"New images saved: {len(saved)}",
+        *([f"Images with an unreadable date (not downloaded in a catch-up): {report['undated']}"]
+          if report.get("undated") else []),
         f"Saved to: {config['output_dir'] or 'Desktop'}",
         "",
     ]
@@ -736,12 +738,13 @@ def save_download(download, folder, prefix):
 # Day/month order of numeric dates like 03/10/2026, learned from dates where
 # one part is over 12 (e.g. 25/09/2026 can only be day-first).
 DATE_ORDER = {"order": None}
+DATE_SAMPLES = []  # date headings that couldn't be read, for the log
 MONTH_FORMATS = ["%b %d %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y"]
 
 
 def learn_date_order(texts):
     for text in texts:
-        for a, b, _ in re.findall(r"\b(\d{1,2})[/.](\d{1,2})[/.](\d{4})\b", text):
+        for a, b, _ in re.findall(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})\b", text):
             if int(a) > 12:
                 DATE_ORDER["order"] = "dmy"
             elif int(b) > 12:
@@ -755,15 +758,16 @@ def possible_dates(text):
         return [date.today()]
     if re.search(r"\byesterday\b", text, re.I):
         return [date.today() - timedelta(days=1)]
-    m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text)
+    m = re.search(r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", text)
     if m:
         try:
             return [date(int(m[1]), int(m[2]), int(m[3]))]
         except ValueError:
             return []
-    m = re.search(r"\b(\d{1,2})[/.](\d{1,2})[/.](\d{4})\b", text)
+    m = re.search(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})\b", text)
     if m:
         a, b, y = int(m[1]), int(m[2]), int(m[3])
+        y = y + 2000 if y < 100 else y
         orders = [DATE_ORDER["order"]] if DATE_ORDER["order"] else ["dmy", "mdy"]
         found = []
         for order in orders:
@@ -813,7 +817,11 @@ def iter_selectable_images(page, url, name, config, timeout_ms):
         log.info("No images for %s", name)
         return
     headers = page.locator(".image-group__header")
-    learn_date_order([headers.nth(i).inner_text() for i in range(headers.count())])
+    heading_texts = [" ".join(headers.nth(i).inner_text().split()) for i in range(headers.count())]
+    learn_date_order(heading_texts)
+    for text in heading_texts:
+        if not possible_dates(text) and text not in DATE_SAMPLES and len(text) <= 40:
+            DATE_SAMPLES.append(text)
     seen = {}
     for box in boxes:
         # The image's card: the largest area around the checkbox holding no other checkbox.
@@ -1135,13 +1143,19 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
             today = datetime.now().strftime("%Y-%m-%d")
 
             cutoff = date.today() - timedelta(days=catch_up_days) if catch_up_days is not None else None
-            listed = saved = 0
+            listed = saved = undated = 0
             for key, name, download, dates in iter_images(page, patients, config, timeout_ms):
                 listed += 1
                 report["listed"] = listed
-                if key in state["downloaded"]:
-                    continue
                 recent = [d for d in dates if cutoff is None or d >= cutoff]
+                if not dates:
+                    undated += 1
+                done = state["downloaded"].get(key)
+                # A catch-up also fetches recent images that an earlier run only
+                # noted as done (e.g. "record what's already there") without saving.
+                only_marked = done is not None and not done.get("files") and not done.get("file")
+                if done and not (cutoff is not None and recent and only_marked):
+                    continue
                 skip = mark_existing or (cutoff is not None and not recent)
                 if dry_run:
                     log.info("%s an image for %s", "Would skip" if skip else "Would download", name)
@@ -1162,6 +1176,10 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                 save_state(state)
 
             log.info("%d images listed", listed)
+            if undated:
+                log.warning("%d images had no date the program could read; sample date headings: %s",
+                            undated, "; ".join(DATE_SAMPLES[:5]) or "(none found)")
+            report["undated"] = undated
             if mark_existing:
                 log.info("Marked all current images as already downloaded")
             elif catch_up_days is not None:
