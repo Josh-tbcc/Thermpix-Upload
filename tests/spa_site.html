@@ -85,8 +85,8 @@ async function render() {
       const cards = Object.entries(groups).map(([d, list]) => `<div class="image-group">
           <div class="image-group__header"><p>${d}</p></div><div class="image-group__pics-wrapper">` +
         list.map(img => `<sc-image-card class="image-card">
-          ${selecting ? `<div class="form-check custom-checkbox archive"><input type="checkbox" value="${img}"
-            style="position:absolute;width:1px;height:1px;opacity:0"></div>` : ""}
+          <div class="form-check custom-checkbox archive" style="${selecting ? "" : "display:none"}">
+            <input type="checkbox" value="${img}" style="position:absolute;width:1px;height:1px;opacity:0"></div>
           <img src="/files/${img}.jpg?sig=${Math.random()}" width="80" height="60"></sc-image-card>`).join("") +
         `</div></div>`).join("");
       // Like Thermpix: "Select image" swaps in a toolbar that includes a red Archive button.

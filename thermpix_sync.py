@@ -920,12 +920,15 @@ def iter_selectable_images(page, url, name, config, timeout_ms):
             for attempt in range(3):
                 box = find_checkbox(page, src_path, index)
                 if box is not None:
-                    if not box.is_checked():
-                        box.check(force=True)
-                    button = button_named(page, config["download_text"],
-                                          wait_seconds=config["ui_wait_seconds"] / 2)
-                    if button:
-                        break
+                    try:
+                        if not box.is_checked():
+                            box.check(force=True, timeout=5000)
+                        button = button_named(page, config["download_text"],
+                                              wait_seconds=config["ui_wait_seconds"] / 2)
+                        if button:
+                            break
+                    except Exception:
+                        pass  # the checkbox is hidden: "Select image" mode is off
                 # Thermpix leaves "Select image" mode after a download: turn it back on.
                 select = button_named(page, config["select_text"], wait_seconds=config["ui_wait_seconds"] / 2)
                 if select:
