@@ -530,13 +530,13 @@ def first_row_text(page):
     return rows[0].inner_text() if rows else ""
 
 
-def wait_for_rows(page, config):
+def wait_for_rows(page, config, seconds=None):
     """Wait for the list to finish loading: rows present and not changing for 3 seconds.
 
     Web apps often show a single "loading" row first and fill in the real
-    patients a moment later.
+    patients a moment later. Returns whether any rows showed up.
     """
-    deadline = time.monotonic() + config["timeout_seconds"]
+    deadline = time.monotonic() + (seconds or config["timeout_seconds"])
     last, stable_since = None, time.monotonic()
     while time.monotonic() < deadline:
         rows = data_rows(page)
@@ -544,8 +544,9 @@ def wait_for_rows(page, config):
         if snapshot != last:
             last, stable_since = snapshot, time.monotonic()
         elif rows and time.monotonic() - stable_since >= 3:
-            return
+            return True
         page.wait_for_timeout(500)
+    return bool(data_rows(page))
 
 
 def click_next(page, config):
@@ -594,16 +595,30 @@ def open_patient_control(row, config):
     return first_cell if first_cell.count() else row
 
 
-def back_to_list(page, config, list_path):
-    """Go back (like the browser's Back button) until the patient list shows again."""
+def back_to_list(page, config, list_url):
+    """Return to the patient list after looking at a patient's file.
+
+    Opening the list afresh works; Thermpix's Back button brings up a saved
+    copy of the list that can come up empty, so that's only a fallback.
+    """
+    wait = config["ui_wait_seconds"] * 2
+    app_navigate(page, list_url, config)
+    if wait_for_rows(page, config, wait):
+        return
+    log.info("The patient list didn't show; trying the Back button")
+    list_path = urlparse(list_url).path
     for _ in range(6):
         if urlparse(page.url).path == list_path:
             break
         page.go_back()
         page.wait_for_load_state("networkidle")
-    if urlparse(page.url).path != list_path:
-        raise RuntimeError("Couldn't get back to the patient list")
-    wait_for_rows(page, config)
+    if urlparse(page.url).path == list_path and wait_for_rows(page, config, wait):
+        return
+    log.info("Still no patient list; opening it from the menu")
+    open_patient_list(page, config)
+    if wait_for_rows(page, config, wait):
+        return
+    raise RuntimeError("Couldn't get back to the patient list")
 
 
 def iter_patients_by_clicking(page, config, limit=None):
@@ -613,7 +628,8 @@ def iter_patients_by_clicking(page, config, limit=None):
     list. (Changing the address directly doesn't work: Thermpix reuses the page
     and keeps showing the previously opened patient.)
     """
-    list_path = urlparse(page.url).path
+    start = urlparse(page.url)
+    list_url = start.path + (f"?{start.query}" if start.query else "")
     columns = name_columns(page)
     opened_total = 0
     for page_number in range(1, config["max_list_pages"] + 1):
@@ -642,7 +658,7 @@ def iter_patients_by_clicking(page, config, limit=None):
             opened += 1
             opened_total += 1
             yield page.url, name
-            back_to_list(page, config, list_path)
+            back_to_list(page, config, list_url)
             # Some lists jump back to page 1 after going back; return to our page.
             if first_row_text(page) != page_start:
                 for _ in range(page_number - 1):

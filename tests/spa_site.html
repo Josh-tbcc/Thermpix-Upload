@@ -16,11 +16,16 @@ const menu = `<nav><span onclick="nav('/dashboard')">Dashboard</span> <span>Enti
 // opens a fresh page, but changing the address behind its back (history/popstate)
 // brings back the patient file that was already open.
 let shownPatient = null;
+// Going Back (a history entry the app made itself) shows a saved copy of the list
+// that comes up empty, like the real Thermpix did.
+let savedCopy = false;
 function nav(path) {
-  shownPatient = null;
-  history.pushState({}, "", path); if (path === "/patients/patients") listPage = 1; render();
+  shownPatient = null; savedCopy = false;
+  history.pushState({app: true}, "", path); if (path === "/patients/patients") listPage = 1; render();
 }
-window.addEventListener("popstate", () => { listPage = 1; render(); });  // like a fresh component
+window.addEventListener("popstate", (e) => {
+  listPage = 1; savedCopy = !!(e.state && e.state.app); render();
+});
 
 async function render() {
   const path = location.pathname;
@@ -54,7 +59,8 @@ async function render() {
   if (path === "/patients/patients") {
     const ids = Object.keys(data.patients);
     const chunk = ids.slice((listPage - 1) * PER_PAGE, listPage * PER_PAGE);
-    const rows = chunk.map(id => `<tr mat-row role="row"><td>${id}</td><td>${data.patients[id].split(" ")[1]}</td>
+    const shown = savedCopy ? [] : chunk;
+    const rows = shown.map(id => `<tr mat-row role="row"><td>${id}</td><td>${data.patients[id].split(" ")[1]}</td>
       <td>${data.patients[id].split(" ")[0]}</td><td>1980</td>
       <td><button aria-label="Details" onclick="nav('/patients/patient/${id}')"><mat-icon><svg width="24" height="24"></svg></mat-icon></button>
       <button aria-label="Edit" onclick="alert('edit?')"><mat-icon><svg width="24" height="24"></svg></mat-icon></button></td></tr>`).join("");
