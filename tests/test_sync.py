@@ -246,6 +246,10 @@ def test_catch_up_after_images_were_only_marked(site):
     assert files(site["out"]) == [f"Jane Citizen - {TODAY} - a1.jpg", f"Mary Jones - {TODAY} - c1.jpg"]
     thermpix_sync.sync(site["config"], catch_up_days=10)  # running it again changes nothing
     assert len(files(site["out"])) == 2
+    # A saved file that has gone missing from the folder is fetched again by a catch-up.
+    (site["out"] / f"Mary Jones - {TODAY} - c1.jpg").unlink()
+    thermpix_sync.sync(site["config"], catch_up_days=10)
+    assert f"Mary Jones - {TODAY} - c1.jpg" in files(site["out"])
 
 
 def test_dates():

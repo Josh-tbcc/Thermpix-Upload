@@ -323,6 +323,8 @@ def send_report(config, report):
         f"New images saved: {len(saved)}",
         *([f"Images with an unreadable date (not downloaded in a catch-up): {report['undated']}"]
           if report.get("undated") else []),
+        *([f"Not downloaded: {report['skipped']}"] if report.get("skipped") else []),
+        *([f"Newest image dates in Thermpix: {report['newest']}"] if report.get("newest") else []),
         f"Saved to: {config['output_dir'] or 'Desktop'}",
         "",
     ]
@@ -776,7 +778,9 @@ def possible_dates(text):
                 found.append(date(y, mo, d))
             except ValueError:
                 pass
-        return list(dict.fromkeys(found))
+        # An image can't be from the future, which rules out one reading of e.g. 12/09/2026.
+        latest = date.today() + timedelta(days=1)
+        return list(dict.fromkeys(d for d in found if d <= latest)) or list(dict.fromkeys(found))
     # "Oct 3, 2026", "3 October 2026", "Sat, Oct 3, 2026"...
     for m in re.finditer(r"(\d{1,2} [A-Za-z]{3,9}|[A-Za-z]{3,9} \d{1,2}),? (\d{4})", text):
         candidate = f"{m[1]} {m[2]}"
@@ -1144,19 +1148,28 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
 
             cutoff = date.today() - timedelta(days=catch_up_days) if catch_up_days is not None else None
             listed = saved = undated = 0
+            reasons = {"already saved": 0, "older than the catch-up window": 0, "no readable date": 0,
+                       "recorded only (record-existing run)": 0}
+            dates_seen = {}
             for key, name, download, dates in iter_images(page, patients, config, timeout_ms):
                 listed += 1
                 report["listed"] = listed
                 recent = [d for d in dates if cutoff is None or d >= cutoff]
                 if not dates:
                     undated += 1
+                for d in dates[:1]:
+                    dates_seen[d] = dates_seen.get(d, 0) + 1
                 done = state["downloaded"].get(key)
-                # A catch-up also fetches recent images that an earlier run only
-                # noted as done (e.g. "record what's already there") without saving.
-                only_marked = done is not None and not done.get("files") and not done.get("file")
-                if done and not (cutoff is not None and recent and only_marked):
+                recorded = (done or {}).get("files") or ([done["file"]] if (done or {}).get("file") else [])
+                # A catch-up also fetches recent images that an earlier run only noted
+                # as done without saving, or whose saved files aren't in the folder any more.
+                missing = done is not None and not any((folder / f).exists() for f in recorded)
+                if done and not (cutoff is not None and recent and missing):
+                    reasons["already saved" if recorded else "recorded only (record-existing run)"] += 1
                     continue
                 skip = mark_existing or (cutoff is not None and not recent)
+                if skip and not mark_existing:
+                    reasons["no readable date" if not dates else "older than the catch-up window"] += 1
                 if dry_run:
                     log.info("%s an image for %s", "Would skip" if skip else "Would download", name)
                     continue
@@ -1176,6 +1189,15 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                 save_state(state)
 
             log.info("%d images listed", listed)
+            skipped = ", ".join(f"{n} {why}" for why, n in reasons.items() if n)
+            log.info("Not downloaded: %s", skipped or "none")
+            newest = sorted(dates_seen.items(), reverse=True)[:8]
+            log.info("Newest image dates seen (date: images): %s",
+                     ", ".join(f"{d.isoformat()}: {n}" for d, n in newest) or "none")
+            if cutoff is not None:
+                log.info("Catch-up window: images dated %s or later", cutoff.isoformat())
+            report["skipped"] = skipped
+            report["newest"] = ", ".join(d.isoformat() for d, _ in newest[:3])
             if undated:
                 log.warning("%d images had no date the program could read; sample date headings: %s",
                             undated, "; ".join(DATE_SAMPLES[:5]) or "(none found)")
