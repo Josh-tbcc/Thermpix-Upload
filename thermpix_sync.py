@@ -324,6 +324,8 @@ def send_report(config, report):
         *([f"Images with an unreadable date (not downloaded in a catch-up): {report['undated']}"]
           if report.get("undated") else []),
         *([f"Not downloaded: {report['skipped']}"] if report.get("skipped") else []),
+        *([f"Patients skipped because their file showed a different name: {report['mismatches']}"]
+          if report.get("mismatches") else []),
         *([f"Newest image dates in Thermpix: {report['newest']}"] if report.get("newest") else []),
         f"Saved to: {config['output_dir'] or 'Desktop'}",
         "",
@@ -592,60 +594,97 @@ def open_patient_control(row, config):
     return first_cell if first_cell.count() else row
 
 
-def patients_by_clicking_rows(page, config, page_number, limit=None):
-    """{url: name} for list rows whose patient file opens on click (no links)."""
-    patients = {}
-    columns = name_columns(page)
-    page_start = first_row_text(page)
-    count = min(len(data_rows(page)), limit or 10**9)
-    log.info("%d rows in the list; opening each with %s", count,
-             "the book icon" if data_rows(page) and data_rows(page)[0].locator(
-                 config["selectors"]["open_patient"] or BOOK_ICON_SELECTOR).count() else "a click on the row")
-    for i in range(count):
-        rows = data_rows(page)
-        if i >= len(rows):
+def back_to_list(page, config, list_path):
+    """Go back (like the browser's Back button) until the patient list shows again."""
+    for _ in range(6):
+        if urlparse(page.url).path == list_path:
             break
-        row = rows[i]
-        name = row_patient_name(row, columns)
-        before = page.url
-        open_patient_control(row, config).click()
-        try:
-            page.wait_for_url(lambda url: url != before, timeout=10000)
-        except PlaywrightTimeout:
-            log.info("Row %d of %d didn't open a patient file", i + 1, count)
-            if i >= 2 and not patients:
-                raise RuntimeError("Clicking the patients in the list doesn't open their file")
-            continue  # this row doesn't open anything
-        page.wait_for_load_state("networkidle")
-        patients.setdefault(page.url, name)
         page.go_back()
         page.wait_for_load_state("networkidle")
-        wait_for_rows(page, config)
-        # Some lists jump back to page 1 after going back; return to our page.
-        if first_row_text(page) != page_start:
-            for _ in range(page_number - 1):
-                click_next(page, config)
-    return patients
-
-
-def all_patients(page, config):
-    """Walk every page of the patient list and return {url: name}."""
-    open_patient_list(page, config)
+    if urlparse(page.url).path != list_path:
+        raise RuntimeError("Couldn't get back to the patient list")
     wait_for_rows(page, config)
+
+
+def iter_patients_by_clicking(page, config, limit=None):
+    """Open each patient's file by clicking its book icon in the list, like a person would.
+
+    Yields (url, name) while that patient's file is open, then goes back to the
+    list. (Changing the address directly doesn't work: Thermpix reuses the page
+    and keeps showing the previously opened patient.)
+    """
+    list_path = urlparse(page.url).path
+    columns = name_columns(page)
+    opened_total = 0
+    for page_number in range(1, config["max_list_pages"] + 1):
+        page_start = first_row_text(page)
+        count = len(data_rows(page))
+        log.info("%d rows in the list; opening each with %s", count,
+                 "the book icon" if data_rows(page) and data_rows(page)[0].locator(
+                     config["selectors"]["open_patient"] or BOOK_ICON_SELECTOR).count() else "a click on the row")
+        opened = 0
+        for i in range(count):
+            rows = data_rows(page)
+            if i >= len(rows):
+                break
+            row = rows[i]
+            name = row_patient_name(row, columns)
+            before = page.url
+            open_patient_control(row, config).click()
+            try:
+                page.wait_for_url(lambda url: url != before, timeout=10000)
+            except PlaywrightTimeout:
+                log.info("Row %d of %d didn't open a patient file", i + 1, count)
+                if i >= 2 and not opened and opened_total == 0:
+                    raise RuntimeError("Clicking the patients in the list doesn't open their file")
+                continue
+            page.wait_for_load_state("networkidle")
+            opened += 1
+            opened_total += 1
+            yield page.url, name
+            back_to_list(page, config, list_path)
+            # Some lists jump back to page 1 after going back; return to our page.
+            if first_row_text(page) != page_start:
+                for _ in range(page_number - 1):
+                    click_next(page, config)
+            if limit and opened_total >= limit:
+                return
+        log.info("Patient list page %d: %d patients", page_number, opened)
+        if not opened or not click_next(page, config):
+            break
+    if not opened_total:
+        raise RuntimeError(
+            f"No patients found on the patient list page ({page.url}): "
+            f"{len(data_rows(page))} table rows, {page.locator('a[href]').count()} links"
+        )
+
+
+def all_patient_links(page, config):
+    """For lists made of ordinary links: walk every page and return {url: name}."""
     patients = {}
     for page_number in range(1, config["max_list_pages"] + 1):
-        found = patient_links_on_page(page, config) or patients_by_clicking_rows(page, config, page_number)
+        found = patient_links_on_page(page, config)
         new = {url: name for url, name in found.items() if url not in patients}
         patients.update(new)
         log.info("Patient list page %d: %d patients", page_number, len(found))
         if not new or not click_next(page, config):
             break
-    if not patients:
-        raise RuntimeError(
-            f"No patients found on the patient list page ({page.url}): "
-            f"{len(data_rows(page))} table rows, {page.locator('a[href]').count()} links"
-        )
     return patients
+
+
+def iter_patient_files(page, config, limit=None):
+    """Open each patient's file in turn; yields (url, name) while it is open."""
+    open_patient_list(page, config)
+    wait_for_rows(page, config)
+    if not patient_links_on_page(page, config):
+        yield from iter_patients_by_clicking(page, config, limit)
+        return
+    patients = all_patient_links(page, config)
+    for n, (url, name) in enumerate(patients.items()):
+        if limit and n >= limit:
+            return
+        app_navigate(page, url, config)
+        yield url, name
 
 
 def row_label(el):
@@ -888,12 +927,33 @@ def name_in_patient_file(page):
     return " ".join(header.inner_text().split())
 
 
-def iter_images(page, patients, config, timeout_ms):
+def name_words(name):
+    return set(re.findall(r"[a-z0-9]+", name.lower()))
+
+
+def same_person(expected, shown):
+    """True when the name shown in the file matches the list (in any order, extra titles allowed)."""
+    a, b = name_words(expected), name_words(shown)
+    return bool(a) and bool(b) and (a <= b or b <= a)
+
+
+MISMATCHES = []  # patients skipped because their file showed someone else
+
+
+def iter_images(page, config, timeout_ms, report=None, limit=None):
     """Yield (key, patient name, download, possible dates) for every image of every patient."""
-    for url, name in patients.items():
-        app_navigate(page, url, config)
+    for url, name in iter_patient_files(page, config, limit):
+        if report is not None:
+            report["patients"] += 1
+        shown = name_in_patient_file(page)
         if not name or name == "Unknown patient":
-            name = name_in_patient_file(page) or "Unknown patient"
+            name = shown or "Unknown patient"
+        elif shown and not same_person(name, shown):
+            # Never save images under the wrong patient's name.
+            log.error("Skipped a patient: opened their file but it showed a different name (%s)",
+                      urlparse(url).path)
+            MISMATCHES.append(urlparse(url).path)
+            continue
         open_images_tab(page, config)
         found = False
         for key, download, dates in iter_selectable_images(page, url, name, config, timeout_ms):
@@ -1095,11 +1155,8 @@ def try_one(config, headed=True):
         page = context.new_page()
         try:
             login(page, config, username, password)
-            open_patient_list(page, config)
-            wait_for_rows(page, config)
-            patients = patient_links_on_page(page, config) or patients_by_clicking_rows(page, config, 1, limit=5)
             today = datetime.now().strftime("%Y-%m-%d")
-            for key, name, download, dates in iter_images(page, patients, config, timeout_ms):
+            for key, name, download, dates in iter_images(page, config, timeout_ms, limit=5):
                 files = download(f"{name} - {dates[0].isoformat() if dates else today}")
                 for f in files:
                     log.info("Test download saved: %s", f)
@@ -1141,9 +1198,6 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
         page = context.new_page()
         try:
             login(page, config, username, password)
-            patients = all_patients(page, config)
-            log.info("Checking %d patients for new images", len(patients))
-            report["patients"] = len(patients)
             today = datetime.now().strftime("%Y-%m-%d")
 
             cutoff = date.today() - timedelta(days=catch_up_days) if catch_up_days is not None else None
@@ -1151,7 +1205,7 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
             reasons = {"already saved": 0, "older than the catch-up window": 0, "no readable date": 0,
                        "recorded only (record-existing run)": 0}
             dates_seen = {}
-            for key, name, download, dates in iter_images(page, patients, config, timeout_ms):
+            for key, name, download, dates in iter_images(page, config, timeout_ms, report):
                 listed += 1
                 report["listed"] = listed
                 recent = [d for d in dates if cutoff is None or d >= cutoff]
@@ -1188,7 +1242,7 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                 }
                 save_state(state)
 
-            log.info("%d images listed", listed)
+            log.info("Checked %d patients; %d images listed", report["patients"], listed)
             skipped = ", ".join(f"{n} {why}" for why, n in reasons.items() if n)
             log.info("Not downloaded: %s", skipped or "none")
             newest = sorted(dates_seen.items(), reverse=True)[:8]
@@ -1202,6 +1256,9 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                 log.warning("%d images had no date the program could read; sample date headings: %s",
                             undated, "; ".join(DATE_SAMPLES[:5]) or "(none found)")
             report["undated"] = undated
+            if MISMATCHES:
+                log.error("%d patients were skipped because their file showed a different name", len(MISMATCHES))
+            report["mismatches"] = len(MISMATCHES)
             if mark_existing:
                 log.info("Marked all current images as already downloaded")
             elif catch_up_days is not None:

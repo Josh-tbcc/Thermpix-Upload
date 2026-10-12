@@ -252,6 +252,12 @@ def test_catch_up_after_images_were_only_marked(site):
     assert f"Mary Jones - {TODAY} - c1.jpg" in files(site["out"])
 
 
+def test_same_person():
+    assert thermpix_sync.same_person("Jane Citizen", "Citizen, Jane")
+    assert thermpix_sync.same_person("Jane Citizen", "Mrs Jane Citizen")
+    assert not thermpix_sync.same_person("John Smith", "Jane Citizen")
+
+
 def test_dates():
     thermpix_sync.DATE_ORDER["order"] = None
     from datetime import date

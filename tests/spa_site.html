@@ -12,7 +12,14 @@ const menu = `<nav><span onclick="nav('/dashboard')">Dashboard</span> <span>Enti
   <a href="/patients" onclick="event.preventDefault()"><mat-icon>groups</mat-icon> Patients</a>
   <span>Devices</span></nav>`;
 
-function nav(path) { history.pushState({}, "", path); if (path === "/patients/patients") listPage = 1; render(); }
+// Like Thermpix (an Angular app that reuses pages): clicking the app's own buttons
+// opens a fresh page, but changing the address behind its back (history/popstate)
+// brings back the patient file that was already open.
+let shownPatient = null;
+function nav(path) {
+  shownPatient = null;
+  history.pushState({}, "", path); if (path === "/patients/patients") listPage = 1; render();
+}
 window.addEventListener("popstate", () => { listPage = 1; render(); });  // like a fresh component
 
 async function render() {
@@ -59,6 +66,8 @@ async function render() {
   }
   const m = path.match(/^\/patients\/patient\/(\w+)$/);
   if (m) {
+    if (shownPatient === null) shownPatient = m[1];
+    m[1] = shownPatient;
     app.innerHTML = menu + `<main><div class="ov-header__text"><p>${data.patients[m[1]]}</p></div>
       <div role="tablist"><span role="tab">Overview</span> <span role="tab" id="images-tab">Images</span></div>
       <div id="tab-body">Overview of the patient</div></main>`;
