@@ -198,15 +198,17 @@ def test_web_app_that_logs_out_on_page_load(site, caplog):
     # The menu link doesn't open the list (like the real run), so it must notice it's
     # still on the dashboard and open the full list directly.
     site["config"]["patients_url"] = "/patients/patients"
+    site["images"]["101"] = ["a0", "a1"]  # two new images for one patient in one run
     thermpix_sync.sync(site["config"])
     assert files(site["out"]) == [
+        f"Jane Citizen - {TODAY} - a0.jpg",
         f"Jane Citizen - {TODAY} - a1.jpg",
         f"John Smith - {TODAY} - b1.jpg",
         f"Mary Jones - {TODAY} - c1.jpg",
     ]
     site["images"]["103"].append("c2")
     thermpix_sync.sync(site["config"])
-    assert len(files(site["out"])) == 4
+    assert len(files(site["out"])) == 5
     assert not site.get("archived"), "the Archive button must never be pressed"
 
 

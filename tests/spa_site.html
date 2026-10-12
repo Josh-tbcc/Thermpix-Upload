@@ -106,6 +106,7 @@ async function render() {
         const a = document.createElement("a");
         a.href = `/files/${ticked[0]}.jpg`; a.download = `${ticked[0]}.jpg`;
         document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => drawImages(false), 300);  // Thermpix leaves selection mode after a download
       };
     };
     document.getElementById("images-tab").onclick = () => drawImages(false);

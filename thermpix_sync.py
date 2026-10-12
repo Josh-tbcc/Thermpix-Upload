@@ -321,6 +321,8 @@ def send_report(config, report):
         f"Patients checked: {report['patients']}",
         f"Images looked at: {report['listed']}",
         f"New images saved: {len(saved)}",
+        *([f"Images that failed to download (will retry next run): {report['failed']}"]
+          if report.get("failed") else []),
         *([f"Images with an unreadable date (not downloaded in a catch-up): {report['undated']}"]
           if report.get("undated") else []),
         *([f"Not downloaded: {report['skipped']}"] if report.get("skipped") else []),
@@ -858,6 +860,23 @@ def image_dates(card):
     return []
 
 
+def find_checkbox(page, src_path, index):
+    """The checkbox of the image with this picture address (or at this position)."""
+    area = images_area(page)
+    boxes = [area.nth(a).locator("input[type=checkbox]").nth(b)
+             for a in range(area.count()) for b in range(area.nth(a).locator("input[type=checkbox]").count())]
+    if src_path:
+        for box in boxes:
+            card = box.locator("xpath=ancestor::*[count(.//input[@type='checkbox'])=1][last()]")
+            picture = card.locator("img").first
+            if picture.count():
+                src = picture.get_attribute("src") or ""
+                if urlparse(urljoin(page.url, src)).path == src_path:
+                    return box
+        return None
+    return boxes[index] if index < len(boxes) else None
+
+
 def iter_selectable_images(page, url, name, config, timeout_ms):
     """Images that are downloaded via "Select image", ticking the image, then "Download".
 
@@ -882,29 +901,47 @@ def iter_selectable_images(page, url, name, config, timeout_ms):
         if not possible_dates(text) and text not in DATE_SAMPLES and len(text) <= 40:
             DATE_SAMPLES.append(text)
     seen = {}
-    for box in boxes:
+    for index, box in enumerate(boxes):
         # The image's card: the largest area around the checkbox holding no other checkbox.
         card = box.locator("xpath=ancestor::*[count(.//input[@type='checkbox'])=1][last()]")
         picture = card.locator("img, canvas").first
         if not picture.count():
             continue  # e.g. a "select all" box
         src = picture.get_attribute("src") or ""
-        if src and not src.startswith(("data:", "blob:")):
-            key = f"{url}|{urlparse(urljoin(page.url, src)).path}"
+        src_path = urlparse(urljoin(page.url, src)).path if src and not src.startswith(("data:", "blob:")) else None
+        if src_path:
+            key = f"{url}|{src_path}"
         else:
             label = " ".join(card.inner_text().split())
             seen[label] = seen.get(label, 0) + 1
             key = f"{url}|{label}#{seen[label]}"
 
-        def download(prefix, box=box):
-            box.check(force=True)
-            button = button_named(page, config["download_text"], wait_seconds=config["ui_wait_seconds"])
-            if not button:
+        def download(prefix, src_path=src_path, index=index):
+            for attempt in range(3):
+                box = find_checkbox(page, src_path, index)
+                if box is not None:
+                    if not box.is_checked():
+                        box.check(force=True)
+                    button = button_named(page, config["download_text"],
+                                          wait_seconds=config["ui_wait_seconds"] / 2)
+                    if button:
+                        break
+                # Thermpix leaves "Select image" mode after a download: turn it back on.
+                select = button_named(page, config["select_text"], wait_seconds=config["ui_wait_seconds"] / 2)
+                if select:
+                    select.click()
+                    page.wait_for_timeout(1000)
+            else:
                 raise RuntimeError(f"No '{config['download_text']}' button after ticking an image")
             with page.expect_download(timeout=timeout_ms) as info:
                 button.click()
             files = save_download(info.value, output_dir(config), prefix)
-            box.uncheck(force=True)
+            try:
+                box = find_checkbox(page, src_path, index)
+                if box is not None and box.is_checked():
+                    box.uncheck(force=True, timeout=5000)
+            except Exception:
+                pass  # the app may already have cleared the selection
             return files
 
         yield key, download, image_dates(card)
@@ -1217,7 +1254,7 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
             today = datetime.now().strftime("%Y-%m-%d")
 
             cutoff = date.today() - timedelta(days=catch_up_days) if catch_up_days is not None else None
-            listed = saved = undated = 0
+            listed = saved = undated = failed = 0
             reasons = {"already saved": 0, "older than the catch-up window": 0, "no readable date": 0,
                        "recorded only (record-existing run)": 0}
             dates_seen = {}
@@ -1246,7 +1283,13 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                 files = []
                 if not skip:
                     taken = (recent or dates or [None])[0]
-                    files = download(f"{name} - {taken.isoformat() if taken else today}")
+                    try:
+                        files = download(f"{name} - {taken.isoformat() if taken else today}")
+                    except Exception as e:
+                        # Leave it unrecorded so the next run tries again.
+                        log.error("Couldn't download an image for %s: %s", name, e)
+                        failed += 1
+                        continue
                     for f in files:
                         log.info("Saved %s", f)
                         report["saved"].append(f.name)
@@ -1272,6 +1315,9 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                 log.warning("%d images had no date the program could read; sample date headings: %s",
                             undated, "; ".join(DATE_SAMPLES[:5]) or "(none found)")
             report["undated"] = undated
+            report["failed"] = failed
+            if failed:
+                log.error("%d images couldn't be downloaded; they'll be tried again next run", failed)
             if MISMATCHES:
                 log.error("%d patients were skipped because their file showed a different name", len(MISMATCHES))
             report["mismatches"] = len(MISMATCHES)
