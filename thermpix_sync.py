@@ -597,16 +597,34 @@ def open_patient_control(row, config):
     return first_cell if first_cell.count() else row
 
 
-def back_to_list(page, config, list_url):
+def wait_for_row_count(page, config, expect, seconds):
+    """Wait until the list shows at least `expect` rows (it can fill in gradually)."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if len(data_rows(page)) >= expect:
+            wait_for_rows(page, config, 5)
+            return True
+        page.wait_for_timeout(500)
+    return len(data_rows(page)) >= expect
+
+
+def back_to_list(page, config, list_url, expect=1):
     """Return to the patient list after looking at a patient's file.
 
     Opening the list afresh works; Thermpix's Back button brings up a saved
     copy of the list that can come up empty, so that's only a fallback.
+    Waits for at least `expect` rows (the first page's full length), reloading
+    the list if it stays short, so a slow load isn't mistaken for the end.
     """
     wait = config["ui_wait_seconds"] * 2
-    app_navigate(page, list_url, config)
-    if wait_for_rows(page, config, wait):
-        return
+    for attempt in range(3):
+        app_navigate(page, list_url, config)
+        if wait_for_row_count(page, config, expect, config["timeout_seconds"] if attempt else wait):
+            return
+        log.info("The patient list showed %d rows instead of %d; loading it again",
+                 len(data_rows(page)), expect)
+    if data_rows(page):
+        return  # carry on with what's there; the shortfall is logged above
     log.info("The patient list didn't show; trying the Back button")
     list_path = urlparse(list_url).path
     for _ in range(6):
@@ -634,9 +652,11 @@ def iter_patients_by_clicking(page, config, limit=None):
     list_url = start.path + (f"?{start.query}" if start.query else "")
     columns = name_columns(page)
     opened_total = 0
+    first_page_rows = 0
     for page_number in range(1, config["max_list_pages"] + 1):
         page_start = first_row_text(page)
         count = len(data_rows(page))
+        first_page_rows = first_page_rows if page_number > 1 else count
         log.info("%d rows in the list; opening each with %s", count,
                  "the book icon" if data_rows(page) and data_rows(page)[0].locator(
                      config["selectors"]["open_patient"] or BOOK_ICON_SELECTOR).count() else "a click on the row")
@@ -644,6 +664,7 @@ def iter_patients_by_clicking(page, config, limit=None):
         for i in range(count):
             rows = data_rows(page)
             if i >= len(rows):
+                log.warning("The list only showed %d of its %d rows; stopping this page early", len(rows), count)
                 break
             row = rows[i]
             name = row_patient_name(row, columns)
@@ -660,7 +681,8 @@ def iter_patients_by_clicking(page, config, limit=None):
             opened += 1
             opened_total += 1
             yield page.url, name
-            back_to_list(page, config, list_url)
+            # The fresh list opens on page 1, which is always full.
+            back_to_list(page, config, list_url, expect=first_page_rows)
             # Some lists jump back to page 1 after going back; return to our page.
             if first_row_text(page) != page_start:
                 for _ in range(page_number - 1):

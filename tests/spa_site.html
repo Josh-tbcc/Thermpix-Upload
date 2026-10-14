@@ -59,7 +59,11 @@ async function render() {
   if (path === "/patients/patients") {
     const ids = Object.keys(data.patients);
     const chunk = ids.slice((listPage - 1) * PER_PAGE, listPage * PER_PAGE);
-    const shown = savedCopy ? [] : chunk;
+    // Like a slow day at the clinic: a reopened list can show a few rows first, then the rest.
+    window.listOpens = (window.listOpens || 0) + 1;
+    const partial = window.listOpens % 3 === 0 && !window.filling;
+    if (partial) { window.filling = true; setTimeout(() => { render(); window.filling = false; }, 4000); }
+    const shown = savedCopy ? [] : partial ? chunk.slice(0, 1) : chunk;
     const rows = shown.map(id => `<tr mat-row role="row"><td>${id}</td><td>${data.patients[id].split(" ")[1]}</td>
       <td>${data.patients[id].split(" ")[0]}</td><td>1980</td>
       <td><button aria-label="Details" onclick="nav('/patients/patient/${id}')"><mat-icon><svg width="24" height="24"></svg></mat-icon></button>
