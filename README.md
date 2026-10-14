@@ -15,6 +15,10 @@ patient and the date the image was taken, e.g. `Jane Citizen - 2026-10-07 - scan
 - After every run it emails a report to yandina@thebalancedchiro.com.au: whether it worked,
   how many patients were checked and the name of every image saved (or what went wrong,
   with a screenshot). Set it up once with `Set Up Email.bat`.
+- Once connected to Practice Software, every new image is also sent there and filed to the
+  patient with the same name (anything it can't match waits on Practice Software's "To file"
+  list). If Practice Software can't be reached, the images wait and are sent on the next run.
+  The DPAs folder keeps getting every image as before.
 
 ## Setup (once, about 5 minutes)
 
@@ -41,6 +45,7 @@ patient and the date the image was taken, e.g. `Jane Citizen - 2026-10-07 - scan
 | Change your Thermpix password | `.venv\Scripts\python.exe thermpix_sync.py --set-login` |
 | Get the latest version of the program | Double-click `Update.bat` |
 | Set up or change the emailed run report | Double-click `Set Up Email.bat` |
+| Send new images to Practice Software too | In Practice Software choose Owner, Connections, make a Thermpix key, then double-click `Connect Practice Software.bat` and paste it |
 | Stop the 7pm runs | Double-click `Uninstall.bat` |
 | Check what happened | Open `%LOCALAPPDATA%\ThermpixSync\sync.log` |
 

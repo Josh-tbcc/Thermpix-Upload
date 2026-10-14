@@ -16,12 +16,15 @@ Usage:
                                           remember every image currently listed
                                           as already downloaded, without
                                           downloading it
+    python thermpix_sync.py --connect-practice
+                                          also send new images to Practice Software
 """
 
 import argparse
 import getpass
 import json
 import logging
+import mimetypes
 import os
 import re
 import smtplib
@@ -33,9 +36,12 @@ import zipfile
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urljoin, urlparse
+from urllib.request import Request, urlopen
 
 import keyring
+import keyring.errors
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
@@ -302,7 +308,8 @@ def set_email(config):
 
 def new_report(mode):
     return {"mode": mode, "started": datetime.now(), "patients": 0, "listed": 0,
-            "saved": [], "error": None, "screenshot": None}
+            "saved": [], "error": None, "screenshot": None,
+            "sent": {"filed": 0, "to_file": 0, "already": 0}, "waiting": 0, "send_error": None}
 
 
 def send_report(config, report):
@@ -332,6 +339,15 @@ def send_report(config, report):
         f"Saved to: {config['output_dir'] or 'Desktop'}",
         "",
     ]
+    sent = report.get("sent") or {}
+    if any(sent.values()) or report.get("waiting") or report.get("send_error"):
+        lines += [
+            f"Sent to Practice Software: {sent.get('filed', 0)} filed to their patient, "
+            f"{sent.get('to_file', 0)} on its To file list",
+            *([f"Waiting to send (tried again next run): {report['waiting']}"] if report.get("waiting") else []),
+            *([f"Couldn't send: {report['send_error']}"] if report.get("send_error") else []),
+            "",
+        ]
     if saved:
         lines.append("Images saved:")
         lines += [f"  {name}" for name in saved]
@@ -343,6 +359,110 @@ def send_report(config, report):
             tail = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
             lines += ["Last lines of the log:"] + tail
     send_email(config, subject, "\n".join(lines), [report["screenshot"]] if report["screenshot"] else [])
+
+
+# --- Practice Software -------------------------------------------------------
+# With a connection key from Practice Software (Owner, Connections), every image saved to the
+# DPAs folder is also sent there and filed to the patient with the same name. Images that can't
+# be sent (no internet, the site down) wait in state.json and are tried again on the next run.
+
+PRACTICE_SERVICE = "ThermpixSync-practice"
+
+
+class PracticeError(Exception):
+    pass
+
+
+def practice_settings():
+    """The Practice Software address and key, or None when this computer isn't connected."""
+    try:
+        url = os.environ.get("PRACTICE_SOFTWARE_URL") or keyring.get_password(PRACTICE_SERVICE, "url")
+        key = os.environ.get("PRACTICE_SOFTWARE_KEY") or keyring.get_password(PRACTICE_SERVICE, "key")
+    except keyring.errors.KeyringError:
+        return None
+    return {"url": url.rstrip("/"), "key": key} if url and key else None
+
+
+def practice_call(settings, path, body):
+    req = Request(settings["url"] + path, data=json.dumps(body).encode(), method="POST",
+                  headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings['key']}"})
+    try:
+        with urlopen(req, timeout=60) as response:
+            return json.loads(response.read() or b"{}")
+    except HTTPError as e:
+        try:
+            message = json.loads(e.read()).get("error")
+        except Exception:
+            message = None
+        raise PracticeError(message or f"Practice Software answered {e.code}") from None
+    except (URLError, OSError) as e:
+        raise PracticeError(f"Couldn't reach Practice Software ({getattr(e, 'reason', e)})") from None
+
+
+def send_file_to_practice(settings, item):
+    """Sends one saved image. Returns "filed", "to_file" or "already"."""
+    path = Path(item["path"])
+    data = path.read_bytes()
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    start = practice_call(settings, "/api/thermpix/start",
+                          {"source_key": item["source_key"], "filename": path.name, "size": len(data)})
+    if start.get("already"):
+        return "already"
+    upload = Request(start["upload_url"], data=data, method="PUT",
+                     headers={"Content-Type": content_type, "x-upsert": "false"})
+    try:
+        with urlopen(upload, timeout=300):
+            pass
+    except (HTTPError, URLError, OSError) as e:
+        raise PracticeError(f"The upload didn't go through ({getattr(e, 'reason', e)})") from None
+    done = practice_call(settings, "/api/thermpix/finish", {
+        "path": start["path"], "source_key": item["source_key"], "name": item["name"],
+        "taken_on": item["taken_on"], "content_type": content_type, "size": len(data),
+        "title": "Thermpix report" if path.suffix.lower() == ".pdf" else "Thermpix scan",
+    })
+    return "filed" if done.get("filed") else "to_file"
+
+
+def send_pending_to_practice(report):
+    """Sends every image waiting for Practice Software; anything that fails waits for next time."""
+    settings = practice_settings()
+    state = load_state()
+    pending = state.get("practice_pending", [])
+    if not settings or not pending:
+        report["waiting"] = len(pending)
+        return
+    remaining = []
+    for n, item in enumerate(pending):
+        if not Path(item["path"]).exists():
+            log.warning("Not sending %s to Practice Software: it's no longer in the folder", Path(item["path"]).name)
+            continue
+        try:
+            result = send_file_to_practice(settings, item)
+            report["sent"][result] += 1
+            log.info("Sent %s to Practice Software (%s)", Path(item["path"]).name, result.replace("_", " "))
+        except PracticeError as e:
+            report["send_error"] = str(e)
+            log.error("Couldn't send %s to Practice Software: %s", Path(item["path"]).name, e)
+            remaining.append(item)
+            if "connection key" in str(e) or "reach" in str(e):
+                remaining += pending[n + 1:]  # the rest would fail the same way
+                break
+    state["practice_pending"] = remaining
+    save_state(state)
+    report["waiting"] = len(remaining)
+
+
+def connect_practice():
+    url = input("Practice Software address (e.g. https://practice-software.vercel.app): ").strip().rstrip("/")
+    key = getpass.getpass("Connection key from Owner, Connections (hidden as you type): ").strip()
+    try:
+        practice_call({"url": url, "key": key}, "/api/thermpix/check", {})
+    except PracticeError as e:
+        print(f"That didn't work: {e}\nCheck the address and key, then run Connect Practice Software.bat again.")
+        return
+    keyring.set_password(PRACTICE_SERVICE, "url", url)
+    keyring.set_password(PRACTICE_SERVICE, "key", key)
+    print("Connected. From the next run, new images are also sent to Practice Software.")
 
 
 # --- page helpers ------------------------------------------------------------
@@ -1247,6 +1367,7 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
     report = report if report is not None else new_report("sync")
     folder = output_dir(config)
     state = load_state()
+    send_to_practice = not dry_run and practice_settings() is not None
     username, password = get_login()
     timeout_ms = int(config["timeout_seconds"] * 1000)
 
@@ -1304,6 +1425,11 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                     for f in files:
                         log.info("Saved %s", f)
                         report["saved"].append(f.name)
+                        if send_to_practice:
+                            state.setdefault("practice_pending", []).append({
+                                "path": str(f), "name": name, "source_key": f"{key}|{f.name}",
+                                "taken_on": taken.isoformat() if taken else today,
+                            })
                     saved += len(files)
                 state["downloaded"][key] = {
                     "patient": name,
@@ -1370,12 +1496,17 @@ def main():
     parser.add_argument("--set-email", action="store_true", help="set up the emailed run reports")
     parser.add_argument("--try-one", action="store_true",
                         help="download a single image as a test (not recorded as downloaded)")
+    parser.add_argument("--connect-practice", action="store_true",
+                        help="connect to Practice Software so new images are sent there too")
     parser.add_argument("--inspect", action="store_true",
                         help="describe the patient list page (no patient details) for troubleshooting")
     args = parser.parse_args()
 
     if args.set_login:
         set_login()
+        return
+    if args.connect_practice:
+        connect_practice()
         return
     if args.inspect:
         setup_logging()
@@ -1411,6 +1542,10 @@ def main():
         sys.exit(1)
     finally:
         if not args.dry_run:
+            try:
+                send_pending_to_practice(report)
+            except Exception:
+                log.exception("Sending to Practice Software failed")
             send_report(config, report)
 
 

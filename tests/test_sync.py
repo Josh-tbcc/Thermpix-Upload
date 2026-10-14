@@ -420,3 +420,105 @@ def test_no_email_when_not_set_up(monkeypatch, tmp_path):
     monkeypatch.delenv("THERMPIX_SMTP_SENDER", raising=False)
     monkeypatch.setattr(thermpix_sync.keyring, "get_password", lambda *a: None)
     assert thermpix_sync.send_email(thermpix_sync.load_config(), "s", "b") is False
+
+
+# --- sending to Practice Software ---------------------------------------------
+
+def make_practice_handler(practice):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def reply(self, code, body):
+            data = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+            if practice["down"]:
+                return self.reply(503, {"error": "Down for maintenance"})
+            if self.headers.get("Authorization") != "Bearer ps_test_key":
+                return self.reply(401, {"error": "That connection key isn't working."})
+            if self.path == "/api/thermpix/check":
+                return self.reply(200, {"ok": True})
+            if self.path == "/api/thermpix/start":
+                if body["source_key"] in practice["filed"]:
+                    return self.reply(200, {"already": True})
+                path = f"files/{len(practice['uploads'])}.jpg"
+                url = f"http://127.0.0.1:{self.server.server_port}/upload/{path}"
+                return self.reply(200, {"already": False, "path": path, "upload_url": url})
+            if self.path == "/api/thermpix/finish":
+                assert body["path"] in practice["uploads"]
+                practice["filed"][body["source_key"]] = body
+                return self.reply(200, {"filed": body["name"] != "Mary Jones", "already": False})
+            self.reply(404, {"error": "Not found"})
+
+        def do_PUT(self):
+            data = self.rfile.read(int(self.headers["Content-Length"]))
+            practice["uploads"][self.path.removeprefix("/upload/")] = data
+            self.send_response(200)
+            self.end_headers()
+
+    return Handler
+
+
+@pytest.fixture
+def practice(monkeypatch):
+    state = {"down": False, "uploads": {}, "filed": {}}
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), make_practice_handler(state))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("PRACTICE_SOFTWARE_URL", f"http://127.0.0.1:{server.server_port}/")
+    monkeypatch.setenv("PRACTICE_SOFTWARE_KEY", "ps_test_key")
+    yield state
+    server.shutdown()
+
+
+def test_new_images_are_sent_to_practice_software(site, practice):
+    report = thermpix_sync.new_report("daily sync")
+    thermpix_sync.sync(site["config"], report=report)
+    thermpix_sync.send_pending_to_practice(report)
+    sent = {v["name"] for v in practice["filed"].values()}
+    assert sent == {"Jane Citizen", "John Smith", "Mary Jones"}
+    assert len(practice["filed"]) == 6
+    assert all(v["taken_on"] == TODAY for v in practice["filed"].values())
+    assert b"JPEGDATA-a1.jpg" in practice["uploads"].values()
+    assert report["sent"] == {"filed": 4, "to_file": 2, "already": 0} and report["waiting"] == 0
+    assert thermpix_sync.load_state()["practice_pending"] == []
+    # The DPAs folder still gets every file, as before.
+    assert len(files(site["out"])) == 6
+
+
+def test_images_wait_and_are_sent_next_time_when_practice_software_is_down(site, practice):
+    practice["down"] = True
+    report = thermpix_sync.new_report("daily sync")
+    thermpix_sync.sync(site["config"], report=report)
+    thermpix_sync.send_pending_to_practice(report)
+    assert report["waiting"] == 6 and "maintenance" in report["send_error"]
+    assert practice["filed"] == {}
+
+    practice["down"] = False
+    later = thermpix_sync.new_report("daily sync")
+    thermpix_sync.send_pending_to_practice(later)
+    assert len(practice["filed"]) == 6 and later["waiting"] == 0
+
+
+def test_wrong_key_keeps_images_waiting(site, practice, monkeypatch, mail):
+    monkeypatch.setenv("PRACTICE_SOFTWARE_KEY", "ps_wrong")
+    report = thermpix_sync.new_report("daily sync")
+    thermpix_sync.sync(site["config"], report=report)
+    thermpix_sync.send_pending_to_practice(report)
+    assert report["waiting"] == 6 and "connection key" in report["send_error"]
+    thermpix_sync.send_report(site["config"], report)
+    body = mail[0].get_content()
+    assert "Waiting to send (tried again next run): 6" in body and "connection key" in body
+
+
+def test_nothing_waits_when_not_connected(site, monkeypatch):
+    monkeypatch.delenv("PRACTICE_SOFTWARE_URL", raising=False)
+    monkeypatch.setattr(thermpix_sync.keyring, "get_password", lambda *a: None)
+    thermpix_sync.sync(site["config"])
+    assert thermpix_sync.load_state().get("practice_pending") is None
