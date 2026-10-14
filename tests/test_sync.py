@@ -260,6 +260,27 @@ def test_same_person():
     assert not thermpix_sync.same_person("John Smith", "Jane Citizen")
 
 
+def test_yesterday_only(site):
+    """The manual "last night" run saves only yesterday's images and leaves the rest alone."""
+    site["spa"] = True
+    site["config"]["patients_url"] = "/patients/patients"
+    thermpix_sync.DATE_ORDER["order"] = None
+
+    def ago(days, fmt="%d/%m/%Y"):
+        return (datetime.now() - timedelta(days=days)).strftime(fmt)
+
+    site["images"] = {"101": ["a1"], "102": ["b1"], "103": ["c1"]}
+    site["dates"] = {"a1": ago(1), "b1": ago(0), "c1": ago(3)}
+    yesterday = (datetime.now() - timedelta(days=1)).date()
+    thermpix_sync.sync(site["config"], only_day=yesterday)
+    assert files(site["out"]) == [f"Jane Citizen - {ago(1, '%Y-%m-%d')} - a1.jpg"]
+    thermpix_sync.sync(site["config"], only_day=yesterday)  # again: nothing new
+    assert len(files(site["out"])) == 1
+    # Today's and older images weren't recorded, so the normal run still gets them.
+    thermpix_sync.sync(site["config"])
+    assert len(files(site["out"])) == 3
+
+
 def test_dates():
     thermpix_sync.DATE_ORDER["order"] = None
     from datetime import date

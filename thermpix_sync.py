@@ -1233,13 +1233,16 @@ def try_one(config, headed=True):
 
 # --- main --------------------------------------------------------------------
 
-def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days=None, report=None):
+def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days=None, report=None,
+         only_day=None):
     """Download every image not downloaded before.
 
     mark_existing: record everything as done without downloading.
     catch_up_days: download images dated within the last N days, and record
     older ones (and undated ones) as done without downloading them.
     report: filled in with what happened, for the email.
+    only_day: download only images taken on this date (that aren't saved yet),
+    leaving every other image untouched for the normal runs.
     """
     report = report if report is not None else new_report("sync")
     folder = output_dir(config)
@@ -1269,12 +1272,17 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                     undated += 1
                 for d in dates[:1]:
                     dates_seen[d] = dates_seen.get(d, 0) + 1
+                if only_day is not None and only_day not in dates:
+                    reasons["taken on another day"] = reasons.get("taken on another day", 0) + 1
+                    continue
                 done = state["downloaded"].get(key)
                 recorded = (done or {}).get("files") or ([done["file"]] if (done or {}).get("file") else [])
                 # A catch-up also fetches recent images that an earlier run only noted
                 # as done without saving, or whose saved files aren't in the folder any more.
                 missing = done is not None and not any((folder / f).exists() for f in recorded)
-                if done and not (cutoff is not None and recent and missing):
+                # Catch-ups and one-day runs re-fetch images recorded but not actually in the folder.
+                refetch = (cutoff is not None and recent) or only_day is not None
+                if done and not (refetch and missing):
                     reasons["already saved" if recorded else "recorded only (record-existing run)"] += 1
                     continue
                 skip = mark_existing or (cutoff is not None and not recent)
@@ -1285,7 +1293,7 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
                     continue
                 files = []
                 if not skip:
-                    taken = (recent or dates or [None])[0]
+                    taken = only_day or (recent or dates or [None])[0]
                     try:
                         files = download(f"{name} - {taken.isoformat() if taken else today}")
                     except Exception as e:
@@ -1326,6 +1334,8 @@ def sync(config, headed=False, dry_run=False, mark_existing=False, catch_up_days
             report["mismatches"] = len(MISMATCHES)
             if mark_existing:
                 log.info("Marked all current images as already downloaded")
+            elif only_day is not None:
+                log.info("Done: %d images taken on %s saved in %s", saved, only_day.isoformat(), folder)
             elif catch_up_days is not None:
                 log.info("Caught up: %d images from the last %d days saved in %s; older ones marked as done",
                          saved, catch_up_days, folder)
@@ -1353,6 +1363,10 @@ def main():
                         help="treat everything currently listed as already downloaded")
     parser.add_argument("--catch-up-days", type=int, metavar="N",
                         help="download images from the last N days; mark older ones as done")
+    parser.add_argument("--yesterday", action="store_true",
+                        help="download only images taken yesterday that aren't saved yet")
+    parser.add_argument("--day", metavar="YYYY-MM-DD",
+                        help="download only images taken on this date that aren't saved yet")
     parser.add_argument("--set-email", action="store_true", help="set up the emailed run reports")
     parser.add_argument("--try-one", action="store_true",
                         help="download a single image as a test (not recorded as downloaded)")
@@ -1381,13 +1395,16 @@ def main():
     if args.set_email:
         set_email(config)
         return
-    mode = ("catch-up of the last %d days" % args.catch_up_days if args.catch_up_days is not None
+    only_day = (date.today() - timedelta(days=1) if args.yesterday
+                else date.fromisoformat(args.day) if args.day else None)
+    mode = ("images taken on %s" % only_day.isoformat() if only_day
+            else "catch-up of the last %d days" % args.catch_up_days if args.catch_up_days is not None
             else "recording existing images" if args.mark_existing
             else "dry run" if args.dry_run else "daily sync")
     report = new_report(mode)
     try:
         sync(config, headed=args.headed, dry_run=args.dry_run, mark_existing=args.mark_existing,
-             catch_up_days=args.catch_up_days, report=report)
+             catch_up_days=args.catch_up_days, report=report, only_day=only_day)
     except Exception as e:
         log.exception("Sync failed")
         report["error"] = f"{e}\n\n{traceback.format_exc()}"

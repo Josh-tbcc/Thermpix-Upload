@@ -35,6 +35,7 @@ patient and the date the image was taken, e.g. `Jane Citizen - 2026-10-07 - scan
 | --- | --- |
 | Run it now | Double-click `Run Now.bat` |
 | Download one image as a test | Double-click `Test Download.bat` |
+| Computer was off at 7pm: get last night's images | Double-click `Upload Last Night.bat` |
 | Fetch any images from the last 10 days not saved yet | Double-click `Catch Up 10 Days.bat` |
 | See what would download without downloading | In a command prompt in the folder: `"Run Now.bat" --dry-run` |
 | Change your Thermpix password | `.venv\Scripts\python.exe thermpix_sync.py --set-login` |
