@@ -420,3 +420,31 @@ def test_no_email_when_not_set_up(monkeypatch, tmp_path):
     monkeypatch.delenv("THERMPIX_SMTP_SENDER", raising=False)
     monkeypatch.setattr(thermpix_sync.keyring, "get_password", lambda *a: None)
     assert thermpix_sync.send_email(thermpix_sync.load_config(), "s", "b") is False
+
+
+def test_waits_for_server_folder(tmp_path, monkeypatch):
+    """Right after waking, the server can take a moment; the run waits instead of failing."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+    config = thermpix_sync.load_config()
+    config["output_dir"] = str(tmp_path / "DPAs")
+    calls = {"n": 0}
+    real_mkdir = Path.mkdir
+
+    def flaky_mkdir(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise OSError(53, "The network path was not found")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", flaky_mkdir)
+    monkeypatch.setattr(thermpix_sync.time, "sleep", lambda s: None)
+    thermpix_sync.SERVER_SEEN["ok"] = False
+    assert thermpix_sync.output_dir(config) == tmp_path / "DPAs"
+    assert calls["n"] == 3
+
+    # A server that never comes back still fails, with a clear message.
+    config["server_wait_minutes"] = 0
+    thermpix_sync.SERVER_SEEN["ok"] = False
+    monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: (_ for _ in ()).throw(OSError(53, "gone")))
+    with pytest.raises(RuntimeError, match="is the server on"):
+        thermpix_sync.output_dir(config)

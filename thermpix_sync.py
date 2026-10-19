@@ -63,6 +63,8 @@ DEFAULTS = {
     # Who gets an email after every run (needs --set-email once on the computer).
     "email_to": ["yandina@thebalancedchiro.com.au"],
     "smtp_port": 587,
+    # How long to wait for the DPAs folder's server at the start of a run.
+    "server_wait_minutes": 10,
     "headless": True,
     "timeout_seconds": 60,
     # How long to wait for buttons and sections to appear in the app.
@@ -176,13 +178,32 @@ def load_config():
     return config
 
 
+SERVER_SEEN = {"ok": False}
+
+
 def output_dir(config):
+    """The DPAs folder, waiting for the server if it isn't reachable yet.
+
+    Right after the computer wakes up the network drive can take a few minutes
+    to come back, and it can drop out briefly during a run. The first time in
+    a run it waits up to server_wait_minutes; later blips get one minute.
+    """
     path = Path(config["output_dir"]) if config["output_dir"] else desktop_dir() / config["folder_name"]
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise RuntimeError(f"Can't open the folder {path} - is the server on and reachable? ({e})")
-    return path
+    minutes = 1 if SERVER_SEEN["ok"] else config["server_wait_minutes"]
+    deadline = time.monotonic() + minutes * 60
+    warned = False
+    while True:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            SERVER_SEEN["ok"] = True
+            return path
+        except OSError as e:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Can't open the folder {path} - is the server on and reachable? ({e})")
+            if not warned:
+                log.warning("Can't reach %s yet; waiting up to %d minute(s) for it", path, minutes)
+                warned = True
+            time.sleep(min(15, max(1, deadline - time.monotonic())))
 
 
 def load_state():
