@@ -448,3 +448,12 @@ def test_waits_for_server_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: (_ for _ in ()).throw(OSError(53, "gone")))
     with pytest.raises(RuntimeError, match="is the server on"):
         thermpix_sync.output_dir(config)
+
+
+def test_only_one_run_at_a_time(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert thermpix_sync.take_run_lock()
+    assert not thermpix_sync.take_run_lock()  # a second run while the first is going stops
+    thermpix_sync.release_run_lock()
+    assert thermpix_sync.take_run_lock()
+    thermpix_sync.release_run_lock()

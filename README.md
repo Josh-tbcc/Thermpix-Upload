@@ -41,6 +41,7 @@ patient and the date the image was taken, e.g. `Jane Citizen - 2026-10-07 - scan
 | Change your Thermpix password | `.venv\Scripts\python.exe thermpix_sync.py --set-login` |
 | Get the latest version of the program | Double-click `Update.bat` |
 | Set up or change the emailed run report | Double-click `Set Up Email.bat` |
+| 7pm run didn't happen: check and rebuild the schedule | Double-click `Fix 7pm Schedule.bat` |
 | Stop the 7pm runs | Double-click `Uninstall.bat` |
 | Check what happened | Open `%LOCALAPPDATA%\ThermpixSync\sync.log` |
 

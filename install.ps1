@@ -60,10 +60,12 @@ $action = New-ScheduledTaskAction -Execute (Join-Path $venv "Scripts\pythonw.exe
     -Argument "`"$(Join-Path $here 'thermpix_sync.py')`"" -WorkingDirectory $here
 $trigger = New-ScheduledTaskTrigger -Daily -At "7:00PM"
 # StartWhenAvailable: if the computer was off at 7pm, run as soon as it's back on.
+# A full run takes over an hour, so allow 4; retry twice if it fails to start.
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    -ExecutionTimeLimit (New-TimeSpan -Hours 4) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -MultipleInstances IgnoreNew -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 15)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
-    -Description "Downloads new Thermpix patient images to Desktop\DPAs" -Force | Out-Null
+    -Description "Downloads new Thermpix patient images to the DPAs folder" -Force | Out-Null
 
 Write-Host "`nAll set. It will run every day at 7pm." -ForegroundColor Green
 Write-Host "Double-click 'Run Now.bat' to test it straight away."

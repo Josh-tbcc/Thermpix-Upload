@@ -1445,16 +1445,43 @@ def main():
             else "recording existing images" if args.mark_existing
             else "dry run" if args.dry_run else "daily sync")
     report = new_report(mode)
+    log.info("Started: %s", mode)
+    if not take_run_lock():
+        return
     try:
         sync(config, headed=args.headed, dry_run=args.dry_run, mark_existing=args.mark_existing,
              catch_up_days=args.catch_up_days, report=report, only_day=only_day)
+    except SystemExit as e:
+        # e.g. no saved login: say so in the log, which is all a scheduled run has.
+        log.error("Stopped: %s", e)
+        report["error"] = str(e)
+        raise
     except Exception as e:
         log.exception("Sync failed")
         report["error"] = f"{e}\n\n{traceback.format_exc()}"
         sys.exit(1)
     finally:
+        release_run_lock()
         if not args.dry_run:
             send_report(config, report)
+
+
+def take_run_lock():
+    """Only one run at a time: two at once (e.g. a manual run overlapping 7pm) clash."""
+    lock = data_dir() / "run.lock"
+    if lock.exists() and time.time() - lock.stat().st_mtime < 4 * 3600:
+        log.warning("Another run is already going (started %s); not starting a second one",
+                    datetime.fromtimestamp(lock.stat().st_mtime).strftime("%d %b %I:%M%p"))
+        return False
+    lock.write_text(str(os.getpid()), encoding="utf-8")
+    return True
+
+
+def release_run_lock():
+    try:
+        (data_dir() / "run.lock").unlink()
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
