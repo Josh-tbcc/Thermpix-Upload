@@ -16,6 +16,22 @@ foreach ($candidate in @("py -3", "python")) {
     } catch {}
 }
 if (-not $exe) {
+    # Not on PATH (e.g. "Add python.exe to PATH" wasn't ticked, or Windows hasn't
+    # picked up the new PATH yet): look in the usual install folders.
+    $found = @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python3*\python.exe"),
+        (Join-Path $env:LOCALAPPDATA "Python\pythoncore-3*\python.exe"),
+        (Join-Path $env:ProgramFiles "Python3*\python.exe"),
+        "C:\Python3*\python.exe"
+    ) | ForEach-Object { Get-ChildItem -Path $_ -ErrorAction SilentlyContinue } |
+        Sort-Object { $_.Directory.Name } -Descending | Select-Object -First 1
+    if ($found) {
+        $exe = $found.FullName
+        $pyArgs = @()
+        Write-Host "Found Python at $exe"
+    }
+}
+if (-not $exe) {
     Write-Host "Python isn't installed. Install it from https://www.python.org/downloads/windows/" -ForegroundColor Red
     Write-Host "(tick 'Add python.exe to PATH' in the installer), then run Install.bat again."
     exit 1
